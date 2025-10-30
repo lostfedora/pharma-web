@@ -128,8 +128,8 @@ const Navbar = () => {
   const navigation: NavItem[] = useMemo(
     () => [
       { name: 'Dashboard', href: '/dashboard', icon: Home, badge: null },
-      { name: 'Inspections', href: '/inspections', icon: ClipboardList, badge: inspectionsCount || null },
-      { name: 'Bounded Drugs', href: '/bounded-drugs', icon: Pill, badge: boundedCount || null },
+      { name: 'Inspection Form', href: '/inspections/new', icon: ClipboardList, badge: inspectionsCount || null },
+      { name: 'Inspections', href: '/inspections', icon: Pill, badge: boundedCount || null },
     ],
     [inspectionsCount, boundedCount]
   );

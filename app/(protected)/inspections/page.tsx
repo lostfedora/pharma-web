@@ -1,685 +1,581 @@
-// app/bounded-drugs/page.tsx
+// app/(protected)/inspections/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   getDatabase,
   ref,
-  onValue,
-  query,
+  query as fbQuery,
   orderByChild,
-  startAt,
-  update,
-  push,
+  limitToLast,
+  endAt,
+  get,
+  onValue,
+  DataSnapshot,
 } from 'firebase/database';
 import primaryApp, { database as primaryDb } from '@/firebase';
-import { getAuth } from 'firebase/auth';
 import {
+  ClipboardList,
   Search,
-  Check,
-  ShieldCheck,
-  Package,
-  X,
-  Loader2,
-  Lock,
-  AlertTriangle,
-  User as UserIcon,
+  MapPin,
   Calendar,
-  Phone,
-  MessageSquare,
+  Eye,
+  Package,
+  Loader2,
+  Plus,
+  Filter,
+  CheckCircle2,
+  AlertCircle,
+  ChevronDown,
 } from 'lucide-react';
 
-/** Types **/
+/* ------------------------------------------------------------------ */
+/* Types                                                              */
+/* ------------------------------------------------------------------ */
+
+type FacilityType = 'Human' | 'Veterinary' | 'Public' | 'Private';
+
 type Inspection = {
   id: string;
-  serialNumber?: string;
-  drugshopName?: string;
-  clientTelephone?: string;
-  location?: any;
-  boxesImpounded?: string | number;
-  reason?: string;
-  impoundedBy?: string;
-  date?: string;
-  createdAt?: string | number;
-  createdBy?: string;
-  status?: string;
-  releasedAt?: number;
-  inspectionId?: string;
+  meta: {
+    docNo?: string;
+    facilityName?: string; // web may not set this
+    drugshopName?: string; // web uses this
+    location?: string;
+    district?: string;
+    type?: FacilityType;
+    date?: string; // ISO
+    createdAt?: string | number;
+  };
+  _stats?: {
+    coldAnswered?: number;
+    coldTotal?: number;
+    outletAnswered?: number;
+    outletTotal?: number;
+  };
 };
 
-/** Utils **/
-function parseNumber(n: any): number {
-  if (typeof n === 'number') return Number.isFinite(n) ? n : 0;
-  if (typeof n === 'string') {
-    const x = Number(n);
-    return Number.isFinite(x) ? x : 0;
+/* ------------------------------------------------------------------ */
+/* Constants / helpers                                                */
+/* ------------------------------------------------------------------ */
+const PAGE_SIZE = 24;
+
+const TYPE_COLORS: Record<FacilityType, string> = {
+  Human: '#3B82F6', // blue-600
+  Veterinary: '#10B981', // emerald-500
+  Public: '#F59E0B', // amber-500
+  Private: '#8B5CF6', // violet-500
+};
+
+function calcPct(ans?: number, total?: number) {
+  if (!total || total <= 0 || !ans) return 0;
+  return Math.max(0, Math.min(100, Math.round((ans / total) * 100)));
+}
+
+function getProgressColor(p: number) {
+  if (p >= 80) return 'text-emerald-600';
+  if (p >= 50) return 'text-amber-600';
+  return 'text-rose-600';
+}
+function getBarColor(p: number) {
+  if (p >= 80) return 'bg-emerald-500';
+  if (p >= 50) return 'bg-amber-500';
+  return 'bg-rose-500';
+}
+
+function fmtDate(iso?: string | number) {
+  if (!iso && iso !== 0) return '—';
+  const d = typeof iso === 'number' ? new Date(iso) : new Date(String(iso));
+  return isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-UG', { year: 'numeric', month: 'short', day: '2-digit' });
+}
+
+function createdAtMs(meta?: Inspection['meta']) {
+  const v = meta?.createdAt;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const t = Date.parse(v);
+    return isNaN(t) ? 0 : t;
+  }
+  // Fallback: try meta.date
+  if (meta?.date) {
+    const t = Date.parse(meta.date);
+    return isNaN(t) ? 0 : t;
   }
   return 0;
 }
 
-function formatDate(isoOrMs?: string | number) {
-  if (!isoOrMs) return '—';
-  const d = typeof isoOrMs === 'number' ? new Date(isoOrMs) : new Date(isoOrMs);
-  if (Number.isNaN(d.getTime())) return '—';
-  return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(d);
-}
-
-const YOOLA_API_KEY = 'xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00';
-// ⚠️ Move this key to a server-side API route/environment secret in production.
-
-const validateTel = (t: string) => /^(\+?\d{7,15})$/.test((t || '').replace(/\s+/g, ''));
-
-/** Page **/
-export default function BoundedFromInspections() {
+/* ------------------------------------------------------------------ */
+/* Page                                                               */
+/* ------------------------------------------------------------------ */
+export default function InspectionsPage() {
   const db = primaryDb ?? getDatabase(primaryApp);
-  const auth = getAuth(primaryApp);
-  const me = auth.currentUser;
+  const router = useRouter();
 
+  const [items, setItems] = useState<Inspection[]>([]);
   const [loading, setLoading] = useState(true);
-  const [rows, setRows] = useState<Inspection[]>([]);
-  const [search, setSearch] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Modal state
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [targetRow, setTargetRow] = useState<Inspection | null>(null);
+  const [qText, setQText] = useState('');
+  const [typeFilter, setTypeFilter] = useState<FacilityType | 'All'>('All');
+  const [district, setDistrict] = useState('');
+  const [dateFrom, setDateFrom] = useState<string>(''); // yyyy-mm-dd
+  const [dateTo, setDateTo] = useState<string>(''); // yyyy-mm-dd
+  const [showFilters, setShowFilters] = useState(false);
 
-  // Release form fields (modal)
-  const [relDate, setRelDate] = useState<string>(() => new Date().toISOString().slice(0, 10)); // yyyy-mm-dd
-  const [clientName, setClientName] = useState('');
-  const [telephone, setTelephone] = useState('');
-  const [releasedBy, setReleasedBy] = useState('');
-  const [comment, setComment] = useState('');
-  const [boxesReleased, setBoxesReleased] = useState('');
+  // for paging we keep the last seen value of meta/createdAt (string or number)
+  const lastSeenOrderVal = useRef<string | number | null>(null);
+  const reachedEnd = useRef(false);
 
-  // focus management
-  const firstFocusableRef = useRef<HTMLInputElement | null>(null);
+  const baseRef = ref(db, 'ndachecklists/submissions');
 
-  // subscribe to bounded items
+  // map a snapshot child into our Inspection shape (ensuring id)
+  function mapChild(child: DataSnapshot): Inspection {
+    const raw: any = child.val() || {};
+    const meta = raw.meta || {};
+    return {
+      id: child.key || '',
+      meta,
+      _stats: raw._stats || {},
+    };
+  }
+
+  // initial subscribe (live top PAGE_SIZE) ordered by meta/createdAt
   useEffect(() => {
-    const qy = query(ref(db, 'inspections'), orderByChild('boxesImpounded'), startAt(1 as any));
+    const q = fbQuery(baseRef, orderByChild('meta/createdAt'), limitToLast(PAGE_SIZE));
     const unsub = onValue(
-      qy,
-      (snap) => {
-        const val = snap.val() as Record<string, any> | null;
-        let list: Inspection[] = [];
-        if (val) list = Object.entries(val).map(([id, v]) => ({ id, ...v }));
-        list = list.filter((r) => parseNumber(r.boxesImpounded) > 0);
-        list.sort((a, b) => {
-          const aT =
-            typeof a.createdAt === 'number'
-              ? a.createdAt
-              : a.createdAt
-                ? Date.parse(a.createdAt)
-                : a.date
-                  ? Date.parse(a.date)
-                  : 0;
-          const bT =
-            typeof b.createdAt === 'number'
-              ? b.createdAt
-              : b.createdAt
-                ? Date.parse(b.createdAt)
-                : b.date
-                  ? Date.parse(b.date)
-                  : 0;
-          return bT - aT;
+      q,
+      (snap: DataSnapshot) => {
+        const next: Inspection[] = [];
+        snap.forEach((child) => {
+          next.push(mapChild(child)); // return void to satisfy RTDB forEach type
+          // return false; // (optional) explicitly continue
         });
-        setRows(list);
+        // sort descending by createdAtMs
+        next.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
+        setItems(next);
+
+        const last = next[next.length - 1];
+        lastSeenOrderVal.current = last ? (last.meta?.createdAt ?? null) : null;
+        reachedEnd.current = next.length < PAGE_SIZE;
         setLoading(false);
       },
-      () => setLoading(false)
+      (err) => {
+        console.error('onValue error', err);
+        setLoading(false);
+      },
     );
     return () => unsub();
-  }, [db]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // modal focus + Esc
-  useEffect(() => {
-    if (!confirmOpen) return;
-    firstFocusableRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setConfirmOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [confirmOpen]);
-
-  const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (!s) return true;
-      return (
-        (r.serialNumber || '').toLowerCase().includes(s) ||
-        (r.drugshopName || '').toLowerCase().includes(s) ||
-        (r.impoundedBy || '').toLowerCase().includes(s) ||
-        (typeof r.location === 'string' ? r.location.toLowerCase().includes(s) : false)
-      );
-    });
-  }, [rows, search]);
-
-  function openReleaseModal(row: Inspection) {
-    setTargetRow(row);
-    setSaveError(null);
-
-    // seed form
-    setRelDate(new Date().toISOString().slice(0, 10));
-    setClientName('');
-    setTelephone(row.clientTelephone || '');
-    setReleasedBy(me?.displayName || me?.email || '');
-    setComment('');
-    setBoxesReleased('');
-
-    setConfirmOpen(true);
-  }
-
-  const availableBoxes = parseNumber(targetRow?.boxesImpounded ?? 0);
-  const intendedCount = Number.isNaN(parseInt(boxesReleased, 10)) ? 0 : parseInt(boxesReleased, 10);
-
-  const canSubmit = useMemo(() => {
-    if (!targetRow) return false;
-    if (!relDate) return false;
-    if (!clientName.trim()) return false;
-    if (!telephone.trim() || !validateTel(telephone)) return false;
-    if (!releasedBy.trim()) return false;
-    if (!intendedCount || intendedCount <= 0) return false;
-    if (intendedCount > availableBoxes) return false;
-    return true;
-  }, [targetRow, relDate, clientName, telephone, releasedBy, intendedCount, availableBoxes]);
-
-  async function sendSms(phone: string, message: string) {
-    // ⚠️ In production, route through your server (/api/send-sms) so the API key stays secret.
-    return fetch('https://yoolasms.com/api/v1/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, message, api_key: YOOLA_API_KEY }),
-    });
-  }
-
-  async function handleSubmitRelease() {
-    if (!targetRow) return;
-    const available = availableBoxes;
-    const count = intendedCount;
-
-    // basic guards (UI already prevents, but double-check)
-    if (!relDate) return setSaveError('Release date is required.');
-    if (!clientName.trim()) return setSaveError('Client name is required.');
-    if (!telephone.trim()) return setSaveError('Telephone number is required.');
-    if (!validateTel(telephone)) return setSaveError('Enter a valid phone number (e.g. +2567XXXXXXX).');
-    if (!releasedBy.trim()) return setSaveError('Released by is required.');
-    if (Number.isNaN(count) || count <= 0) return setSaveError('Enter a valid number of boxes to release.');
-    if (count > available) return setSaveError(`You are releasing ${count}, but only ${available} are impounded.`);
-
+  // refresh (pull fresh last PAGE_SIZE once)
+  async function onRefresh() {
     try {
-      setSaveError(null);
-      setSavingId(targetRow.id);
+      setRefreshing(true);
+      reachedEnd.current = false;
+      lastSeenOrderVal.current = null;
 
-      // 1) Write release record
-      const releaseRef = ref(db, `releases/${targetRow.id}`);
-      const nowIso = new Date().toISOString();
-      await push(releaseRef, {
-        inspectionId: targetRow.id,
-        date: new Date(relDate).toISOString(),
-        clientName: clientName.trim(),
-        telephone: telephone.replace(/\s+/g, ''),
-        releasedBy: releasedBy.trim(),
-        comment: comment.trim(),
-        boxesReleased: count,
-        createdAt: nowIso,
-        createdByUid: me?.uid ?? 'anonymous',
-        createdByEmail: me?.email ?? null,
-        createdByName: me?.displayName ?? null,
+      const q = fbQuery(baseRef, orderByChild('meta/createdAt'), limitToLast(PAGE_SIZE));
+      const snap = await get(q);
+
+      const next: Inspection[] = [];
+      snap.forEach((child) => {
+        next.push(mapChild(child)); // return void
+        // return false;
       });
+      next.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
 
-      // 2) Update inspection
-      const remaining = Math.max(0, available - count);
-      const isStringType = typeof targetRow.boxesImpounded === 'string';
-      const nextStatus = remaining === 0 ? 'Completed' : 'Pending Review';
-
-      await update(ref(db, `inspections/${targetRow.id}`), {
-        boxesImpounded: isStringType ? String(remaining) : remaining,
-        status: nextStatus,
-        releasedAt: Date.now(),
-        releasedBy: me?.uid ?? 'anonymous',
-        releasedByEmail: me?.email ?? null,
-        releasedByName: me?.displayName ?? null,
-        lastReleaseNote: comment.trim() || null,
-        lastReleaseCount: count,
-      });
-
-      // 3) Send SMS
-      const when = new Date(relDate);
-      const whenStr = isNaN(when.getTime())
-        ? relDate
-        : when.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-
-      const msg =
-        `Dear ${targetRow.drugshopName || 'Drugshop'}, ` +
-        `${count} box(es) have been released on ${whenStr}. ` +
-        `Serial: ${targetRow.serialNumber || '—'}. ` +
-        `Remaining: ${remaining}. ` +
-        `Officer: ${releasedBy.trim()}.`;
-
-      let smsOk = true;
-      try {
-        const smsRes = await sendSms(telephone.replace(/\s+/g, ''), msg);
-        if (!smsRes.ok) smsOk = false;
-      } catch {
-        smsOk = false;
-      }
-
-      setConfirmOpen(false);
-      alert(`Release recorded${smsOk ? ' and SMS sent' : ' (SMS failed)'}.\nStatus: ${nextStatus}`);
-    } catch (e: any) {
-      console.error(e);
-      setSaveError(e?.message || 'Failed to submit release. Please try again.');
+      setItems(next);
+      const last = next[next.length - 1];
+      lastSeenOrderVal.current = last ? (last.meta?.createdAt ?? null) : null;
+      reachedEnd.current = next.length < PAGE_SIZE;
+    } catch (e) {
+      console.error('refresh error', e);
+      alert('Could not refresh. Check your connection and try again.');
     } finally {
-      setSavingId(null);
+      setRefreshing(false);
     }
   }
 
-  const statusPill = (r: Inspection) => {
-    const boxes = parseNumber(r.boxesImpounded);
-    if (boxes > 0)
-      return (
-        <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 ring-amber-200 dark:ring-amber-800/50">
-          impounded
-        </span>
+  // infinite load (older)
+  async function loadMore() {
+    if (loadingMore || reachedEnd.current || lastSeenOrderVal.current == null) return;
+    try {
+      setLoadingMore(true);
+      const q = fbQuery(
+        baseRef,
+        orderByChild('meta/createdAt'),
+        endAt(
+          typeof lastSeenOrderVal.current === 'number'
+            ? (lastSeenOrderVal.current as number) - 1 // go strictly older for numeric timestamps
+            : (lastSeenOrderVal.current as string),
+        ),
+        limitToLast(PAGE_SIZE),
       );
-    if (r.releasedAt)
-      return (
-        <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200 ring-green-200 dark:ring-green-800/50">
-          released
-        </span>
-      );
-    return '—';
-  };
+      const snap = await get(q);
+      const batch: Inspection[] = [];
+      snap.forEach((child) => {
+        batch.push(mapChild(child)); // return void
+        // return false;
+      });
+      batch.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
+
+      if (batch.length === 0) {
+        reachedEnd.current = true;
+      } else {
+        setItems((prev) => {
+          const seen = new Set(prev.map((x) => x.id));
+          const merged = [...prev];
+          batch.forEach((it) => {
+            if (!seen.has(it.id)) merged.push(it);
+          });
+          // keep global list sorted
+          merged.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
+          return merged;
+        });
+        const last = batch[batch.length - 1];
+        lastSeenOrderVal.current = last ? (last.meta?.createdAt ?? lastSeenOrderVal.current) : lastSeenOrderVal.current;
+        if (batch.length < PAGE_SIZE) reachedEnd.current = true;
+      }
+    } catch (e) {
+      console.error('loadMore error', e);
+      alert('Failed to load more records.');
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  // filtering (client-side)
+  const visible = useMemo(() => {
+    const key = qText.trim().toLowerCase();
+    const df = dateFrom ? new Date(dateFrom).getTime() : null;
+    const dt = dateTo ? new Date(dateTo).getTime() + 24 * 3600 * 1000 - 1 : null; // inclusive end of day
+    const distKey = district.trim().toLowerCase();
+
+    return items.filter((it) => {
+      const m = it.meta ?? {};
+      const created = createdAtMs(m);
+
+      const name = (m.facilityName || m.drugshopName || '').toLowerCase();
+      const doc = (m.docNo || '').toLowerCase();
+      const dist = (m.district || '').toLowerCase();
+
+      const textMatch = !key || name.includes(key) || doc.includes(key) || dist.includes(key);
+      const typeMatch = typeFilter === 'All' || m.type === typeFilter;
+      const distMatch = !distKey || dist.includes(distKey);
+      const dateMatch = (!df || created >= df) && (!dt || created <= dt);
+
+      return textMatch && typeMatch && distMatch && dateMatch;
+    });
+  }, [items, qText, typeFilter, district, dateFrom, dateTo]);
+
+  /* ------------------------------------------------------------------ */
+  /* UI                                                                 */
+  /* ------------------------------------------------------------------ */
 
   return (
-    <main className="mx-auto max-w-[120rem] px-3 sm:px-4 lg:px-8 py-6 sm:py-8">
-      {/* Header */}
-      <div className="mb-5 sm:mb-6">
-        <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Bounded Drugs</h1>
-        <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Inspections with impounded boxes.</p>
-      </div>
-
-      {/* Filters */}
-      <div className="mb-4">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by Serial, Drugshop, Officer or Location…"
-            className="pl-9 pr-10 py-2.5 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white/70 dark:bg-gray-900/70 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
-          />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-              aria-label="Clear search"
-            >
-              <X className="h-4 w-4 text-gray-500" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Results container */}
-      <section className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
-        <header className="flex items-center justify-between px-3 sm:px-4 py-3 border-b border-gray-200 dark:border-gray-800">
-          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
-            {!loading ? (
-              <>
-                Total: <span className="font-semibold text-gray-800 dark:text-gray-100">{rows.length}</span>
-                <span className="mx-2">•</span>
-                Showing: <span className="font-semibold text-gray-800 dark:text-gray-100">{filtered.length}</span>
-              </>
-            ) : (
-              'Loading…'
-            )}
-          </p>
-          <div className="hidden sm:flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-            <span>Realtime</span>
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden />
+    <main className="mx-auto w-full max-w-7xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
+      {/* Top bar */}
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="h-11 w-11 rounded-2xl border border-blue-200 bg-blue-50 dark:border-blue-900/40 dark:bg-blue-900/20 grid place-items-center">
+            <ClipboardList className="h-5 w-5 text-blue-800 dark:text-blue-200" />
           </div>
-        </header>
-
-        {/* Mobile list (cards) */}
-        <ul className="sm:hidden divide-y divide-gray-100 dark:divide-gray-800" role="list">
-          {loading ? (
-            Array.from({ length: 6 }).map((_, i) => (
-              <li key={`m-sk-${i}`} className="p-3">
-                <div className="space-y-2 animate-pulse">
-                  <div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded" />
-                  <div className="h-3 w-28 bg-gray-200 dark:bg-gray-800 rounded" />
-                  <div className="h-3 w-20 bg-gray-200 dark:bg-gray-800 rounded" />
-                </div>
-              </li>
-            ))
-          ) : filtered.length === 0 ? (
-            <li className="p-8 text-center text-gray-600 dark:text-gray-400">No impounded items found.</li>
-          ) : (
-            filtered.map((r) => {
-              const boxes = parseNumber(r.boxesImpounded);
-              const isCompleted = (r.status || '').toLowerCase().includes('complete') || boxes === 0;
-              return (
-                <li key={r.id} className="p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{r.serialNumber || '—'}</p>
-                      <p className="mt-0.5 text-xs text-gray-600 dark:text-gray-400 truncate">{r.drugshopName || '—'}</p>
-                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{formatDate(r.date || r.createdAt)}</p>
-                      <div className="mt-1">{statusPill(r)}</div>
-                    </div>
-                    <div className="shrink-0 flex flex-col items-end gap-2">
-                      <Link
-                        href={`/inspections/${r.id}`}
-                        className="inline-flex items-center gap-1 rounded-xl border border-gray-300 dark:border-gray-700 px-2.5 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-800"
-                        title="Open inspection"
-                      >
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        Open
-                      </Link>
-                      <button
-                        onClick={() => openReleaseModal(r)}
-                        className="inline-flex items-center gap-1 rounded-xl bg-green-600 hover:bg-green-700 text-white px-2.5 py-1.5 text-xs disabled:opacity-60"
-                        disabled={savingId === r.id || isCompleted}
-                        title="Open release form"
-                      >
-                        <Lock className="h-3.5 w-3.5" />
-                        Release
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              );
-            })
-          )}
-        </ul>
-
-        {/* Table (sm and up) */}
-        <div className="hidden sm:block overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-600 dark:text-gray-300 sticky top-0 z-10">
-              <tr>
-                <th className="px-4 py-3 text-left font-semibold">Serial</th>
-                <th className="px-4 py-3 text-left font-semibold">Drugshop</th>
-                <th className="px-4 py-3 text-left font-semibold">Location</th>
-                <th className="px-4 py-3 text-left font-semibold">Boxes</th>
-                <th className="px-4 py-3 text-left font-semibold">Date</th>
-                <th className="px-4 py-3 text-left font-semibold">Officer</th>
-                <th className="px-4 py-3 text-left font-semibold">Status</th>
-                <th className="px-4 py-3 text-right font-semibold">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-              {loading ? (
-                Array.from({ length: 6 }).map((_, i) => (
-                  <tr key={`sk-${i}`} className="animate-pulse">
-                    <td className="px-4 py-3"><div className="h-4 w-24 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-10 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-28 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 w-20 bg-gray-200 dark:bg-gray-800 rounded" /></td>
-                    <td className="px-4 py-3 text-right"><div className="h-9 w-28 bg-gray-200 dark:bg-gray-800 rounded-xl ml-auto" /></td>
-                  </tr>
-                ))
-              ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-6 py-10 text-center text-gray-600 dark:text-gray-400">
-                    No impounded items found in inspections.
-                  </td>
-                </tr>
-              ) : (
-                filtered.map((r) => {
-                  const boxes = parseNumber(r.boxesImpounded);
-                  const isCompleted = (r.status || '').toLowerCase().includes('complete') || boxes === 0;
-
-                  return (
-                    <tr key={r.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/40">
-                      <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100 max-w-[12rem] truncate">{r.serialNumber || '—'}</td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300 max-w-[18rem] truncate">{r.drugshopName || '—'}</td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300 max-w-[18rem] truncate">
-                        {typeof r.location === 'string'
-                          ? r.location
-                          : r.location?.coordinates
-                            ? 'has coordinates'
-                            : '—'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{boxes}</td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300 whitespace-nowrap">{formatDate(r.date || r.createdAt)}</td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{r.impoundedBy || '—'}</td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{statusPill(r)}</td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="inline-flex items-center gap-2">
-                          <Link
-                            href={`/inspections/${r.id}`}
-                            className="inline-flex items-center gap-1 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
-                            title="Open inspection"
-                          >
-                            <ShieldCheck className="h-4 w-4" />
-                            Inspection
-                          </Link>
-
-                          <button
-                            onClick={() => openReleaseModal(r)}
-                            className="inline-flex items-center gap-1 rounded-xl bg-green-600 hover:bg-green-700 text-white px-3 py-2 disabled:opacity-60"
-                            title="Open release form"
-                            disabled={savingId === r.id || isCompleted}
-                          >
-                            <Lock className="h-4 w-4" />
-                            Release
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">Inspections</h1>
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              {items.length} total inspection{items.length !== 1 ? 's' : ''}
+            </p>
+          </div>
         </div>
 
-        {!loading && (
-          <div className="flex items-center justify-between px-4 py-3 text-xs text-gray-600 dark:text-gray-400">
-            <span>Total: {rows.length}</span>
-            <span>Showing: {filtered.length}</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-700 dark:text-slate-200 disabled:opacity-60"
+          >
+            {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Filter className="h-4 w-4" />}
+            Refresh
+          </button>
+
+          <Link
+            href="/inspections/new"
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-800 text-white px-3 py-2 text-sm"
+          >
+            <Plus className="h-4 w-4" />
+            New Inspection
+          </Link>
+        </div>
+      </div>
+
+      {/* Search + Filters */}
+      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-3 sm:p-4 mb-4">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-3">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+            <input
+              value={qText}
+              onChange={(e) => setQText(e.target.value)}
+              placeholder="Search facility, district, or document number…"
+              className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/60"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowFilters((s) => !s)}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200"
+          >
+            <Filter className="h-4 w-4" /> Filters
+            <ChevronDown className="h-4 w-4" />
+          </button>
+        </div>
+
+        {showFilters && (
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
+            {/* Type */}
+            <div>
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">Facility Type</label>
+              <select
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as FacilityType | 'All')}
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+              >
+                <option>All</option>
+                <option>Human</option>
+                <option>Veterinary</option>
+                <option>Public</option>
+                <option>Private</option>
+              </select>
+            </div>
+
+            {/* District */}
+            <div>
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">District (contains)</label>
+              <input
+                value={district}
+                onChange={(e) => setDistrict(e.target.value)}
+                placeholder="e.g. Kasese"
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+              />
+            </div>
+
+            {/* From */}
+            <div>
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">Date From</label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+              />
+            </div>
+
+            {/* To */}
+            <div>
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">Date To</label>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+              />
+            </div>
           </div>
         )}
       </section>
 
-      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2">
-        <Package className="h-4 w-4" /> Data source: <code className="px-1">/inspections</code> (filtered where <code className="px-1">boxesImpounded &gt; 0</code>).
-      </p>
-
-      {/* Release Form Modal (Scrollable Content, No Confirmation) */}
-      {confirmOpen && targetRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/50 supports-[backdrop-filter]:backdrop-blur-sm"
-            onClick={() => setConfirmOpen(false)}
-          />
-
-          {/* Dialog */}
-          <div
-            className="relative z-10 w-full max-w-xl sm:max-w-2xl rounded-2xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 supports-[backdrop-filter]:backdrop-blur-xl shadow-xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="release-title"
-          >
-            {/* Saving overlay */}
-            {savingId === targetRow.id && (
-              <div className="absolute inset-0 rounded-2xl bg-white/60 dark:bg-black/40 backdrop-blur-sm flex items-center justify-center z-10">
-                <Loader2 className="h-6 w-6 animate-spin text-gray-600 dark:text-gray-200" />
-              </div>
-            )}
-
-            {/* Header */}
-            <div className="px-4 sm:px-5 pt-4 sm:pt-5 pb-3 border-b border-gray-200 dark:border-gray-800 flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-amber-500" />
-                <h2 id="release-title" className="text-base sm:text-lg font-semibold">Release Form</h2>
-              </div>
-              <button
-                className="rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-800"
-                onClick={() => setConfirmOpen(false)}
-                aria-label="Close"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div className="px-4 sm:px-5 py-4 max-h-[75vh] overflow-y-auto">
-              {/* Summary */}
-              <div className="text-sm grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <p><span className="text-gray-500">Serial:</span> <span className="font-medium break-words">{targetRow.serialNumber || '—'}</span></p>
-                <p><span className="text-gray-500">Drugshop:</span> <span className="font-medium break-words">{targetRow.drugshopName || '—'}</span></p>
-                <p><span className="text-gray-500">Impounded:</span> <span className="font-medium">{availableBoxes} box(es)</span></p>
-                <p className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                  <UserIcon className="h-4 w-4" />
-                  Officer: <span className="font-medium text-gray-800 dark:text-gray-200 ml-1">
-                    {me?.displayName || me?.email || me?.uid || 'anonymous'}
-                  </span>
-                </p>
-              </div>
-
-              {/* Progress hint */}
-              <div className="mt-3">
-                <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
-                  <span>Remaining after this release</span>
-                  <span className="font-medium">{Math.max(0, availableBoxes - (intendedCount || 0))}</span>
-                </div>
-                <div className="h-2 rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
-                  <div
-                    className="h-full bg-green-600 transition-all"
-                    style={{
-                      width: `${Math.min(100, (intendedCount > 0 ? (intendedCount / Math.max(availableBoxes, 1)) * 100 : 0))}%`,
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Form */}
-              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Date */}
-                <div>
-                  <label className="text-sm font-medium flex items-center gap-2"><Calendar className="h-4 w-4" /> Date *</label>
-                  <input
-                    ref={firstFocusableRef}
-                    type="date"
-                    value={relDate}
-                    onChange={(e) => setRelDate(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
-                  />
-                </div>
-
-                {/* Client name */}
-                <div>
-                  <label className="text-sm font-medium">Client Name *</label>
-                  <input
-                    value={clientName}
-                    onChange={(e) => setClientName(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
-                    placeholder="Facility representative"
-                  />
-                </div>
-
-                {/* Telephone */}
-                <div>
-                  <label className="text-sm font-medium flex items-center gap-2"><Phone className="h-4 w-4" /> Telephone *</label>
-                  <input
-                    value={telephone}
-                    onChange={(e) => setTelephone(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
-                    placeholder="+2567XXXXXXXX"
-                  />
-                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">We’ll notify this number via SMS after release.</p>
-                </div>
-
-                {/* Released by */}
-                <div>
-                  <label className="text-sm font-medium">Released By *</label>
-                  <input
-                    value={releasedBy}
-                    onChange={(e) => setReleasedBy(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
-                    placeholder="Officer name"
-                  />
-                </div>
-
-                {/* Boxes Released */}
-                <div>
-                  <label className="text-sm font-medium flex items-center gap-2"><Package className="h-4 w-4" /> Boxes Released *</label>
-                  <input
-                    value={boxesReleased}
-                    onChange={(e) => setBoxesReleased(e.target.value.replace(/[^\d]/g, ''))}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
-                    placeholder="e.g. 2"
-                    inputMode="numeric"
-                  />
-                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Available: {availableBoxes} box(es)</p>
-                </div>
-
-                {/* Comment */}
-                <div className="sm:col-span-2">
-                  <label className="text-sm font-medium flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Comment</label>
-                  <textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    rows={4}
-                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
-                    placeholder="Receipt number, notes…"
-                  />
-                </div>
-
-                {/* Error */}
-                {saveError && (
-                  <div className="sm:col-span-2">
-                    <div className="rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-900/20 px-3 py-2 text-sm text-rose-700 dark:text-rose-300">
-                      {saveError}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Sticky actions */}
-            <div className="px-4 sm:px-5 py-3 border-t border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-900/70 backdrop-blur supports-[backdrop-filter]:backdrop-blur-md rounded-b-2xl flex flex-wrap items-center justify-end gap-2">
-              <button
-                onClick={() => setConfirmOpen(false)}
-                className="inline-flex items-center gap-1 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
-                disabled={savingId === targetRow.id}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSubmitRelease}
-                disabled={!canSubmit || savingId === targetRow.id}
-                className="inline-flex items-center gap-2 rounded-xl bg-green-600 hover:bg-green-700 text-white px-4 py-2 disabled:opacity-60"
-                title="Submit release"
-              >
-                {savingId === targetRow.id ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Check className="h-4 w-4" />
-                )}
-                Submit Release
-              </button>
-            </div>
-          </div>
+      {/* Results header */}
+      {!loading && (
+        <div className="mb-3 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-900/40 px-3 py-2 text-sm text-slate-700 dark:text-slate-300">
+          Showing {visible.length} inspection{visible.length !== 1 ? 's' : ''}{qText ? ` for “${qText}”` : ''}
         </div>
       )}
+
+      {/* Content */}
+      {loading ? (
+        <div className="min-h-[40vh] grid place-items-center">
+          <div className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            <span>Loading inspections…</span>
+          </div>
+        </div>
+      ) : visible.length === 0 ? (
+        <EmptyState hasQuery={!!qText} onCreate={() => router.push('/inspections/new')} />
+      ) : (
+        <>
+          {/* Grid of cards */}
+          <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {visible.map((item) => (
+              <li key={item.id}>
+                <InspectionCard item={item} />
+              </li>
+            ))}
+          </ul>
+
+          {/* Load more */}
+          <div className="flex items-center justify-center my-6">
+            {reachedEnd.current ? (
+              <div className="inline-flex items-center gap-2 text-emerald-600 text-sm">
+                <CheckCircle2 className="h-4 w-4" />
+                <span>All inspections loaded</span>
+              </div>
+            ) : (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 text-sm text-slate-700 dark:text-slate-200 disabled:opacity-60"
+              >
+                {loadingMore ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Load more
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Floating Create button (mobile emphasis) */}
+      <Link
+        href="/inspections/new"
+        className="fixed right-4 bottom-4 inline-flex items-center justify-center rounded-full h-12 w-12 bg-blue-800 text-white shadow-lg lg:hidden"
+        aria-label="Create Inspection"
+      >
+        <Plus className="h-5 w-5" />
+      </Link>
     </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Components                                                         */
+/* ------------------------------------------------------------------ */
+
+function InspectionCard({ item }: { item: Inspection }) {
+  const m = item.meta ?? {};
+  const title = m.facilityName || m.drugshopName || 'Unnamed Facility';
+  const dateLabel = fmtDate(m.date || m.createdAt);
+
+  const coldPct = calcPct(item._stats?.coldAnswered, item._stats?.coldTotal);
+  const outletPct = calcPct(item._stats?.outletAnswered, item._stats?.outletTotal);
+
+  const t = (m.type || 'Private') as FacilityType; // default visual
+  const typeColor = TYPE_COLORS[t] || '#64748B';
+
+  return (
+    <article className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span
+              className="inline-flex items-center gap-2 rounded-lg px-2 py-1 text-[11px] font-semibold"
+              style={{ backgroundColor: '#DBEAFE', color: '#2563EB' }}
+              title="Document Number"
+            >
+              <ClipboardList className="h-3.5 w-3.5" />
+              <span className="truncate">{m.docNo || item.id}</span>
+            </span>
+
+            <span
+              className="inline-flex items-center rounded-lg px-2 py-0.5 text-[11px] font-semibold border"
+              style={{
+                color: typeColor,
+                backgroundColor: `${typeColor}20`,
+                borderColor: `${typeColor}55`,
+              }}
+              title="Facility Type"
+            >
+              {m.type || '—'}
+            </span>
+          </div>
+
+          <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 truncate">{title}</h3>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <Link
+            href={`/inspections/${encodeURIComponent(item.id)}`}
+            className="inline-flex items-center justify-center rounded-xl border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200"
+            title="View"
+          >
+            <Eye className="h-4 w-4" />
+          </Link>
+          <Link
+            href={`/impound?ref=${encodeURIComponent(item.id)}`}
+            className="inline-flex items-center justify-center rounded-xl bg-rose-600 text-white px-2.5 py-1.5 text-xs"
+            title="Impound"
+          >
+            <Package className="h-4 w-4" />
+          </Link>
+        </div>
+      </div>
+
+      {/* Meta */}
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600 dark:text-slate-300">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <MapPin className="h-3.5 w-3.5 text-slate-400" />
+          <span className="truncate" title={m.district || ''}>
+            {m.district || 'Unknown District'}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Calendar className="h-3.5 w-3.5 text-slate-400" />
+          <span>{dateLabel}</span>
+        </div>
+      </div>
+
+      {/* Progress */}
+      <div className="mt-4 space-y-3">
+        <ProgressRow label="Cold Chain" pct={coldPct} />
+        <ProgressRow label="Drug Outlet" pct={outletPct} />
+      </div>
+    </article>
+  );
+}
+
+function ProgressRow({ label, pct }: { label: string; pct: number }) {
+  const txt = getProgressColor(pct);
+  const bar = getBarColor(pct);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{label}</span>
+        <span className={`text-xs font-bold ${txt}`}>{pct}%</span>
+      </div>
+      <div className="h-1.5 w-full rounded bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
+        <div className={`h-1.5 rounded ${bar}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ hasQuery, onCreate }: { hasQuery: boolean; onCreate: () => void }) {
+  return (
+    <section className="min-h-[40vh] grid place-items-center">
+      <div className="max-w-md text-center space-y-3">
+        <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm mx-auto">
+          {hasQuery ? <AlertCircle className="h-6 w-6 text-amber-600" /> : <ClipboardList className="h-6 w-6 text-slate-400" />}
+        </div>
+        <h3 className="text-base sm:text-lg font-semibold text-slate-800 dark:text-slate-200">
+          {hasQuery ? 'No matching inspections' : 'No inspections yet'}
+        </h3>
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {hasQuery ? 'Try adjusting your search or filter options.' : 'Start by creating your first inspection checklist.'}
+        </p>
+
+        {!hasQuery && (
+          <button onClick={onCreate} className="inline-flex items-center gap-2 rounded-xl bg-blue-800 text-white px-4 py-2 text-sm">
+            <Plus className="h-4 w-4" />
+            Create Inspection
+          </button>
+        )}
+      </div>
+    </section>
   );
 }

@@ -1,9 +1,9 @@
 // app/dashboard/page.tsx
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Link from 'next/link';
-import app, { database } from '@/firebase';
+import app, { database as primaryDb } from '@/firebase';
 import { getAuth } from 'firebase/auth';
 import {
   ref,
@@ -11,6 +11,7 @@ import {
   query as rtdbQuery,
   orderByChild,
   limitToLast,
+  DataSnapshot,
 } from 'firebase/database';
 import {
   ClipboardList,
@@ -23,37 +24,59 @@ import {
   X,
 } from 'lucide-react';
 
-// Optional wrappers (keep imports if you already have these components)
-// import AuthGate from '@/components/AuthGate';
-// import Navbar from '@/components/Navbar';
+/* -------- Types (unchanged) -------- */
+type FacilityType = 'Human' | 'Veterinary' | 'Public' | 'Private';
+type Submission = {
+  meta?: {
+    docNo?: string;
+    date?: string;
+    serialNumber?: string;
+    source?: 'web' | 'mobile' | string;
+    drugshopName?: string;
+    drugshopContactPhones?: string;
+    boxesImpounded?: string;
+    impoundedBy?: string;
+    location?: {
+      coordinates?: { latitude: number; longitude: number };
+      formattedAddress?: string;
+    } | null;
+    status?: string;
+    createdAt?: string;          // ISO
+    createdBy?: string;
+    district?: string;
+    type?: FacilityType;
+  };
+  impoundment?: {
+    totalBoxes?: string;
+  };
+  _stats?: {
+    coldAnswered?: number;
+    coldTotal?: number;
+    outletAnswered?: number;
+    outletTotal?: number;
+  };
+};
 
-/** Types **/
-type InspectionLite = {
+type RowLite = {
   id: string;
   serialNumber?: string;
   drugshopName?: string;
   createdAtMs: number;
   boxes: number;
 };
-
-type InspectionFull = {
+type RowFull = {
   id: string;
   serialNumber?: string;
   drugshopName?: string;
-  location?: any;
-  clientTelephone?: string;
   boxesImpounded?: number | string;
-  impoundedBy?: string;
-  createdAt?: number | string;
-  date?: string;
   status?: string;
-  releasedAt?: number | string;
-  releasedBy?: string;
+  createdAt?: string;
+  date?: string;
+  releasedAt?: string;
   releaseNote?: string;
-  [k: string]: any;
 };
 
-/** Utils **/
+/* -------- Utils (unchanged) -------- */
 function toNum(n: unknown) {
   if (typeof n === 'number') return Number.isFinite(n) ? n : 0;
   if (typeof n === 'string') {
@@ -62,10 +85,10 @@ function toNum(n: unknown) {
   }
   return 0;
 }
-function toMs(x?: string | number) {
-  if (!x && x !== 0) return 0;
-  if (typeof x === 'number') return Number.isFinite(x) ? x : 0;
-  const t = Date.parse(String(x));
+function toMs(iso?: string | number | null) {
+  if (iso == null) return 0;
+  if (typeof iso === 'number') return Number.isFinite(iso) ? iso : 0;
+  const t = Date.parse(String(iso));
   return Number.isFinite(t) ? t : 0;
 }
 function fmt(ms?: number) {
@@ -79,7 +102,7 @@ function fmt(ms?: number) {
   }).format(new Date(ms));
 }
 
-/** Small components **/
+/* -------- Small components (unchanged) -------- */
 function KPI({
   name,
   value,
@@ -98,11 +121,7 @@ function KPI({
   loading: boolean;
 }) {
   return (
-    <div
-      className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm p-4 focus-within:ring-2 focus-within:ring-blue-500"
-      role="region"
-      aria-label={`${name} summary`}
-    >
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm p-4 focus-within:ring-2 focus-within:ring-blue-500">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm text-gray-500 dark:text-gray-400">{name}</p>
@@ -132,7 +151,6 @@ function KPI({
     </div>
   );
 }
-
 function SkeletonRow() {
   return (
     <tr className="animate-pulse">
@@ -145,9 +163,11 @@ function SkeletonRow() {
   );
 }
 
-/** Page **/
+/* -------- Page -------- */
 function DashboardPageInner() {
-  const auth = getAuth(app);
+  // Keep auth/db in refs so effects can use [] deps without changing size
+  const authRef = useRef(getAuth(app));
+  const dbRef = useRef(primaryDb);
 
   const [loading, setLoading] = useState(true);
 
@@ -158,54 +178,59 @@ function DashboardPageInner() {
   const [drugshopsCount, setDrugshopsCount] = useState(0);
 
   // Recent inspections
-  const [recent, setRecent] = useState<InspectionLite[]>([]);
+  const [recent, setRecent] = useState<RowLite[]>([]);
 
   // Modal state
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selected, setSelected] = useState<InspectionFull | null>(null);
+  const [selected, setSelected] = useState<RowFull | null>(null);
   const [loadingModal, setLoadingModal] = useState(false);
 
-  // Subscribe: recent inspections (server-sorted by createdAt/date)
+  /* ---------- Recent: top 12 ordered by meta/createdAt (ISO) ---------- */
   useEffect(() => {
-    const q = rtdbQuery(ref(database, 'inspections'), orderByChild('createdAt'), limitToLast(12));
+    const base = ref(dbRef.current, 'ndachecklists/submissions');
+    const q = rtdbQuery(base, orderByChild('meta/createdAt'), limitToLast(12));
     const unsub = onValue(
       q,
-      (snap) => {
-        const val = (snap.val() ?? {}) as Record<string, any>;
-        const list: InspectionLite[] = Object.entries(val)
-          .map(([id, v]) => {
-            const createdAtMs = toMs(v.createdAt ?? v.date);
-            return {
-              id,
-              serialNumber: v.serialNumber,
-              drugshopName: v.drugshopName,
-              createdAtMs,
-              boxes: toNum(v.boxesImpounded),
-            };
-          })
-          .sort((a, b) => b.createdAtMs - a.createdAtMs)
-          .slice(0, 10);
-        setRecent(list);
+      (snap: DataSnapshot) => {
+        const list: RowLite[] = [];
+        snap.forEach((child) => {
+          const v = child.val() as Submission;
+          const m = v?.meta || {};
+          const createdAtMs = toMs(m.createdAt ?? m.date);
+          list.push({
+            id: child.key!,
+            serialNumber: m.serialNumber,
+            drugshopName: m.drugshopName,
+            createdAtMs,
+            boxes: toNum(m.boxesImpounded ?? v.impoundment?.totalBoxes),
+          });
+        });
+        list.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setRecent(list.slice(0, 10));
         setLoading(false);
       },
       () => setLoading(false)
     );
     return () => unsub();
-  }, []);
+  }, []); // ← fixed: constant size
 
-  // Subscribe: compute all KPI counts from one listener
+  /* ---------- KPIs in one listener ---------- */
   useEffect(() => {
     const unsub = onValue(
-      ref(database, 'inspections'),
+      ref(dbRef.current, 'ndachecklists/submissions'),
       (snap) => {
-        const val = (snap.val() ?? {}) as Record<string, any>;
-        const entries = Object.values(val) as any[];
-
-        const total = entries.length;
-        const bounded = entries.reduce((acc, row) => (toNum(row?.boxesImpounded) > 0 ? acc + 1 : acc), 0);
-        const released = entries.reduce((acc, row) => (toMs(row?.releasedAt) > 0 ? acc + 1 : acc), 0);
-
+        const total = snap.size;
+        let bounded = 0;
+        let released = 0;
+        snap.forEach((child) => {
+          const v = child.val() as Submission;
+          const boxes = toNum(v?.meta?.boxesImpounded ?? v?.impoundment?.totalBoxes);
+          if (boxes > 0) bounded += 1;
+          // If/when you add releasedAt at root:
+          const releasedMs = toMs((v as any)?.releasedAt);
+          if (releasedMs > 0) released += 1;
+        });
         setInspectionsCount(total);
         setBoundedCount(bounded);
         setReleasedCount(released);
@@ -217,20 +242,20 @@ function DashboardPageInner() {
       }
     );
     return () => unsub();
-  }, []);
+  }, []); // ← fixed
 
-  // Subscribe: /drugshops registry count
+  /* ---------- Drugshops registry count ---------- */
   useEffect(() => {
     const unsub = onValue(
-      ref(database, 'drugshops'),
+      ref(dbRef.current, 'drugshops'),
       (snap) => {
-        const val = (snap.val() ?? {}) as Record<string, any>;
+        const val = (snap.val() ?? {}) as Record<string, unknown>;
         setDrugshopsCount(Object.keys(val).length);
       },
       () => setDrugshopsCount(0)
     );
     return () => unsub();
-  }, []);
+  }, []); // ← fixed
 
   const kpis = useMemo(
     () => [
@@ -243,7 +268,7 @@ function DashboardPageInner() {
         pill: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
       },
       {
-        name: 'Bounded Drugs',
+        name: 'Impounded (boxes > 0)',
         value: boundedCount,
         icon: Pill,
         href: '/bounded-drugs',
@@ -251,7 +276,7 @@ function DashboardPageInner() {
         pill: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
       },
       {
-        name: 'Released Drugs',
+        name: 'Released',
         value: releasedCount,
         icon: PackageCheck,
         href: '/released-drugs',
@@ -274,40 +299,51 @@ function DashboardPageInner() {
     setSelectedId(id);
     setOpen(true);
   }, []);
-
   const closeModal = useCallback(() => {
     setOpen(false);
     setSelectedId(null);
     setSelected(null);
   }, []);
 
-  // Modal data subscription (clean up reliably)
+  /* ---------- Modal subscription (single record) ---------- */
   useEffect(() => {
     if (!open || !selectedId) return;
     setLoadingModal(true);
-
-    const node = ref(database, `inspections/${selectedId}`);
+    const node = ref(dbRef.current, `ndachecklists/submissions/${selectedId}`);
     const unsub = onValue(
       node,
       (snap) => {
-        const v = snap.val();
-        setSelected(v ? ({ id: selectedId, ...v } as InspectionFull) : null);
+        const v = snap.val() as Submission | null;
+        if (!v) {
+          setSelected(null);
+        } else {
+          const m = v.meta || {};
+          setSelected({
+            id: selectedId,
+            serialNumber: m.serialNumber,
+            drugshopName: m.drugshopName,
+            boxesImpounded: m.boxesImpounded ?? v.impoundment?.totalBoxes,
+            status: m.status,
+            createdAt: m.createdAt,
+            date: m.date,
+            releasedAt: (v as any)?.releasedAt,
+            releaseNote: (v as any)?.releaseNote,
+          });
+        }
         setLoadingModal(false);
       },
       () => setLoadingModal(false)
     );
     return () => unsub();
-  }, [open, selectedId]);
+  }, [open, selectedId]); // size is constant (2)
 
-  // ESC to close
+  /* ---------- ESC to close ---------- */
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeModal();
-    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && closeModal();
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, closeModal]);
+  }, [open, closeModal]); // size is constant (2)
 
   return (
     <main className="mx-auto max-w-[120rem] px-3 sm:px-4 lg:px-8 py-6 sm:py-8">
@@ -315,11 +351,13 @@ function DashboardPageInner() {
       <div className="mb-6 sm:mb-8 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Dashboard</h1>
-          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Live overview from Realtime Database.</p>
+          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
+            Live overview from <code className="px-1 rounded bg-gray-100 dark:bg-gray-800">/ndachecklists/submissions</code>.
+          </p>
         </div>
         <div className="mt-2 sm:mt-0 flex gap-2">
           <Link
-            href="/inspections/new"
+            href="/inspection-form"
             className="inline-flex items-center gap-2 rounded-xl bg-blue-600 text-white px-3 py-2 text-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <ClipboardList className="h-4 w-4" />
@@ -354,7 +392,7 @@ function DashboardPageInner() {
         </div>
       </section>
 
-      {/* Recent Inspections */}
+      {/* Recent */}
       <section className="mt-6 sm:mt-8 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
         <div className="flex items-center justify-between px-3 sm:px-4 py-3 border-b border-gray-200 dark:border-gray-800">
           <h2 className="text-sm sm:text-base font-semibold text-gray-900 dark:text-white">Recent Inspections</h2>
@@ -366,7 +404,7 @@ function DashboardPageInner() {
           </Link>
         </div>
 
-        {/* Mobile list (cards) */}
+        {/* Mobile list */}
         <ul className="divide-y divide-gray-100 dark:divide-gray-800 sm:hidden" role="list">
           {loading ? (
             Array.from({ length: 6 }).map((_, i) => (
@@ -411,7 +449,7 @@ function DashboardPageInner() {
           )}
         </ul>
 
-        {/* Table for sm+ */}
+        {/* Table */}
         <div className="hidden sm:block overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-600 dark:text-gray-300 sticky top-0 z-10">
@@ -459,15 +497,13 @@ function DashboardPageInner() {
 
       {/* Footer meta */}
       <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        Data sources: <code className="px-1">/inspections</code> and <code className="px-1">/drugshops</code>.
+        Data source: <code className="px-1">ndachecklists/submissions</code>. Ordered by <code className="px-1">meta/createdAt</code>.
       </p>
 
       {/* Modal */}
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
           <button className="absolute inset-0 bg-black/50" onClick={closeModal} aria-label="Close modal backdrop" />
-          {/* Dialog */}
           <div
             role="dialog"
             aria-modal="true"
@@ -509,11 +545,11 @@ function DashboardPageInner() {
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Created At</div>
-                    <div className="font-medium">{fmt(toMs((selected.createdAt as any) ?? selected.date))}</div>
+                    <div className="font-medium">{fmt(toMs(selected.createdAt ?? selected.date))}</div>
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Status</div>
-                    <div className="font-medium">{selected.status || 'draft'}</div>
+                    <div className="font-medium">{selected.status || 'submitted'}</div>
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Released</div>
@@ -560,13 +596,6 @@ function DashboardPageInner() {
   );
 }
 
-// Page export (wrap with your Auth/NAV if needed)
 export default function DashboardPage() {
-  return (
-    // <AuthGate>
-    //   <Navbar />
-    //   <DashboardPageInner />
-    // </AuthGate>
-    <DashboardPageInner />
-  );
+  return <DashboardPageInner />;
 }
