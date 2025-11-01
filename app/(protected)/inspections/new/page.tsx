@@ -23,9 +23,7 @@ import {
   Info,
   ChevronDown,
   ChevronRight,
-  Percent,
   ShieldCheck,
-  FileSignature,
   AlertTriangle,
 } from 'lucide-react';
 
@@ -39,63 +37,11 @@ const YOOLA_API_KEY =
 /* ------------------------------------------------------------------ */
 /* Static data                                                        */
 /* ------------------------------------------------------------------ */
-type YesNo = '' | 'yes' | 'no';
 type ImpoundReason =
   | 'Unsuitable premises'
   | 'Unqualified personnel'
   | 'Illegal possession of drugs'
   | 'Unlicensed';
-
-const COLDCHAIN_SECTIONS: { title: string; items: { key: string; label: string }[] }[] = [
-  {
-    title: '1. Cold chain handling equipment',
-    items: [
-      { key: '1.1', label: 'Functional refrigerator/freezer/cold room?' },
-      { key: '1.2', label: 'Pharmaceutical-type refrigerator used?' },
-      { key: '1.3', label: 'Refrigerator powered at inspection time?' },
-      { key: '1.4', label: 'Refrigerator/cold room clean?' },
-      { key: '1.5', label: 'Power backup available?' },
-      { key: '1.6', label: 'Temperature monitoring device present?' },
-      { key: '1.7', label: 'Monitoring device calibrated?' },
-      { key: '1.8', label: 'Vaccine carriers/cool boxes present?' },
-      { key: '1.9', label: 'No unauthorized products in refrigerator?' },
-    ],
-  },
-  {
-    title: '2. Vaccine storage, status and record',
-    items: [
-      { key: '2.1', label: 'Evidence of stock records?' },
-      { key: '2.2', label: 'Temperature monitoring chart present?' },
-      { key: '2.3', label: 'Temperature chart filled up to date?' },
-      { key: '2.4', label: 'Responsible person trained in cold chain?' },
-      { key: '2.5', label: 'Expired medicines stored separately?' },
-      { key: '2.6', label: 'Records for expired medicines available?' },
-    ],
-  },
-];
-
-const DRUGOUTLET_ITEMS: { key: string; label: string }[] = [
-  { key: '01', label: 'Valid Operating license for current year available?' },
-  { key: '02', label: 'Displayed current license & certificate of suitability?' },
-  { key: '03', label: 'Attendant qualified & registered?' },
-  { key: '04', label: 'Valid annual practicing licenses displayed?' },
-  { key: '05', label: 'Evidence of prescription records?' },
-  { key: '06', label: 'Permanent building with well-painted walls?' },
-  { key: '07', label: 'Proper ceiling (plywood/concrete) present?' },
-  { key: '08', label: 'Cemented/tiled floor easy to clean?' },
-  { key: '09', label: 'Premises clean & organized?' },
-  { key: '10', label: 'Authorized SOPs present (Pharmacies)?' },
-  { key: '11', label: 'Shelves not overstocked/congested?' },
-  { key: '12', label: 'Light-sensitive products protected from light?' },
-  { key: '13', label: 'Designated area for expired/damaged drugs?' },
-  { key: '14', label: 'Records for expired/damaged drugs?' },
-  { key: '15', label: 'No improper handling/misuse of drugs?' },
-  { key: '16', label: 'Temperature & humidity device present?' },
-  { key: '17', label: 'Daily temperature records maintained?' },
-  { key: '18', label: 'Up-to-date purchase & sales records?' },
-  { key: '19', label: 'Functional hand-washing unit available?' },
-  { key: '20', label: 'Clear signpost matching NDA license?' },
-];
 
 const IMPOUND_REASONS: ImpoundReason[] = [
   'Unsuitable premises',
@@ -165,41 +111,6 @@ async function reserveNumbers(db: ReturnType<typeof getDatabase>) {
   return { docNo: formatDoc(doc), serialNo: formatSerial(serial) };
 }
 
-/* --- Firebase-safe key helpers (no . # $ / [ ]) ------------------- */
-const INVALID_KEY_CHARS = /[.#$/\[\]]/g;
-const safeKey = (k: string) => k.replace(INVALID_KEY_CHARS, '_');
-
-// Build an index of question labels keyed by safe key (for saving to DB)
-function buildColdQuestionIndex() {
-  const index: Record<string, string> = {};
-  for (const section of COLDCHAIN_SECTIONS) {
-    for (const it of section.items) {
-      index[safeKey(it.key)] = it.label;
-    }
-  }
-  return index;
-}
-function buildOutletQuestionIndex() {
-  const index: Record<string, string> = {};
-  for (const it of DRUGOUTLET_ITEMS) {
-    index[safeKey(it.key)] = it.label;
-  }
-  return index;
-}
-
-// Merge answers + labels into one Firebase-safe object
-function answersWithLabels(
-  answers: Record<string, YesNo>,
-  labels: Record<string, string>
-) {
-  const out: Record<string, { label: string; value: YesNo }> = {};
-  for (const [rawKey, val] of Object.entries(answers || {})) {
-    const key = safeKey(rawKey);
-    out[key] = { label: labels[key] ?? rawKey, value: val };
-  }
-  return out;
-}
-
 /* ---------- Error helpers & guarded push (timeout + offline) ------ */
 function friendlyError(err: any): string {
   const code: string | undefined =
@@ -231,43 +142,8 @@ async function pushWithGuard(dbRef: ReturnType<typeof ref>, payload: any) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Memoized UI atoms (prevent focus loss)                             */
+/* Memoized UI atoms                                                  */
 /* ------------------------------------------------------------------ */
-const ProgressBar = React.memo(function ProgressBar({ pct }: { pct: number }) {
-  return (
-    <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-      <div className="h-full bg-blue-700 dark:bg-blue-400" style={{ width: `${pct}%` }} />
-    </div>
-  );
-});
-
-const YesNoToggle = React.memo(function YesNoToggle({
-  value,
-  onChange,
-}: {
-  value: YesNo;
-  onChange: (v: YesNo) => void;
-}) {
-  return (
-    <div role="group" aria-label="Yes or No" className="inline-flex rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => onChange('yes')}
-        className={`px-3 py-1.5 text-sm ${value === 'yes' ? 'bg-emerald-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-      >
-        Yes
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange('no')}
-        className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${value === 'no' ? 'bg-rose-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-      >
-        No
-      </button>
-    </div>
-  );
-});
-
 const Accordion = React.memo(function Accordion({
   id,
   title,
@@ -327,26 +203,6 @@ const Field = React.memo(function Field({
       <div className={hasError ? 'rounded-xl ring-2 ring-rose-400/70' : 'rounded-xl'}>{children}</div>
       {hint ? <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{hint}</p> : <p className="h-0 text-xs" />}
       {hasError ? <p className="mt-1 text-xs text-rose-600">{error}</p> : <p className="h-0 text-xs" />}
-    </div>
-  );
-});
-
-const Row = React.memo(function Row({
-  idx,
-  label,
-  children,
-}: {
-  idx: string;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
-      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-        <span className="text-blue-700 dark:text-blue-300 font-bold mr-1">{idx}</span>
-        {label}
-      </p>
-      <div>{children}</div>
     </div>
   );
 });
@@ -414,13 +270,6 @@ export default function InspectionFormPage() {
     sendSms: true,
   });
 
-  const [coldAnswers, setColdAnswers] = useState<Record<string, YesNo>>({});
-  const [qualification, setQualification] = useState('');
-  const [recommendations, setRecommendations] = useState('');
-  const [facilityRepName, setFacilityRepName] = useState('');
-  const [facilityRepContact, setFacilityRepContact] = useState('');
-
-  const [outletAnswers, setOutletAnswers] = useState<Record<string, YesNo>>({});
   const [lastVisit, setLastVisit] = useState<string>('');
   const [lastLicenseDate, setLastLicenseDate] = useState<string>('');
   const [prevScores, setPrevScores] = useState('');
@@ -436,14 +285,9 @@ export default function InspectionFormPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({
     details: true,
-    drugshop: true,
+    drugshop: true,     // section id kept; title changed below
     impound: true,
-    coldEquip: false,
-    coldRecord: false,
-    coldQualSig: false,
-    outletA: false,
-    outletB: false,
-    visitSig: false,
+    visitSig: true,
     review: true,
   });
 
@@ -470,19 +314,13 @@ export default function InspectionFormPage() {
     return unsub;
   }, [auth, router]);
 
-  // Autosave/restore
+  // Autosave/restore (trimmed to current fields)
   useEffect(() => {
     const raw = localStorage.getItem('inspection-autosave');
     if (!raw) return;
     try {
       const p = JSON.parse(raw);
       setFormData((v) => ({ ...v, ...(p.formData || {}) }));
-      setColdAnswers(p.coldAnswers || {});
-      setQualification(p.qualification || '');
-      setRecommendations(p.recommendations || '');
-      setFacilityRepName(p.facilityRepName || '');
-      setFacilityRepContact(p.facilityRepContact || '');
-      setOutletAnswers(p.outletAnswers || {});
       setLastVisit(p.lastVisit || '');
       setLastLicenseDate(p.lastLicenseDate || '');
       setPrevScores(p.prevScores || '');
@@ -497,12 +335,6 @@ export default function InspectionFormPage() {
   useEffect(() => {
     const payload = {
       formData,
-      coldAnswers,
-      qualification,
-      recommendations,
-      facilityRepName,
-      facilityRepContact,
-      outletAnswers,
       lastVisit,
       lastLicenseDate,
       prevScores,
@@ -515,12 +347,6 @@ export default function InspectionFormPage() {
     localStorage.setItem('inspection-autosave', JSON.stringify(payload));
   }, [
     formData,
-    coldAnswers,
-    qualification,
-    recommendations,
-    facilityRepName,
-    facilityRepContact,
-    outletAnswers,
     lastVisit,
     lastLicenseDate,
     prevScores,
@@ -561,18 +387,6 @@ export default function InspectionFormPage() {
     () => (formData.boxesImpounded ? parseInt(formData.boxesImpounded, 10) || 0 : 0),
     [formData.boxesImpounded]
   );
-
-  const coldTotals = useMemo(() => {
-    const total = COLDCHAIN_SECTIONS.flatMap((s) => s.items).length;
-    const answered = Object.values(coldAnswers).filter((v) => v !== '').length;
-    return { answered, total, pct: total ? Math.round((answered / total) * 100) : 0 };
-  }, [coldAnswers]);
-
-  const outletTotals = useMemo(() => {
-    const total = DRUGOUTLET_ITEMS.length;
-    const answered = Object.values(outletAnswers).filter((v) => v !== '').length;
-    return { answered, total, pct: total ? Math.round((answered / total) * 100) : 0 };
-  }, [outletAnswers]);
 
   /* ---------------- Location ---------------- */
   async function captureLocation() {
@@ -616,7 +430,7 @@ export default function InspectionFormPage() {
           minute: '2-digit',
         });
     const message =
-      `Dear ${payload.drugshopName || 'Drugshop'}, ` +
+      `Dear ${payload.drugshopName || 'Facility'}, ` +
       `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
       `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`;
 
@@ -638,15 +452,10 @@ export default function InspectionFormPage() {
     const summary: string[] = [];
     let ok = true;
 
-    // Required: Drugshop Name + Education Qualification
+    // Required: Facility Name
     if (!formData.drugshopName?.trim()) {
       next.drugshopName = 'This field is required';
-      summary.push('drugshopName: required');
-      ok = false;
-    }
-    if (!qualification?.trim()) {
-      next.qualification = 'This field is required';
-      summary.push('qualification: required');
+      summary.push('facilityName: required');
       ok = false;
     }
 
@@ -682,15 +491,11 @@ export default function InspectionFormPage() {
 
     setIsSubmitting(true);
     try {
-      // Build question label maps
-      const coldQuestionLabels = buildColdQuestionIndex();
-      const outletQuestionLabels = buildOutletQuestionIndex();
-
       const meta = {
         docNo: formData.docNo,
         date: new Date(formData.date).toISOString(),
         serialNumber: (formData.serialNumber || '').trim(),
-        source: 'web', // mobile should set 'mobile' for same path
+        source: 'web',
         drugshopName: (formData.drugshopName || '').trim(),
         drugshopContactPhones: (formData.drugshopContactPhones || '').trim(),
         boxesImpounded: (formData.boxesImpounded || '').trim(),
@@ -711,15 +516,7 @@ export default function InspectionFormPage() {
 
       const payload = {
         meta,
-        cold: {
-          answers: answersWithLabels(coldAnswers, coldQuestionLabels),
-          qualification,
-          recommendations,
-          facilityRepName,
-          facilityRepContact,
-        },
-        outlet: {
-          answers: answersWithLabels(outletAnswers, outletQuestionLabels),
+        visit: {
           lastVisit: lastVisit ? new Date(lastVisit).toISOString() : null,
           lastLicenseDate: lastLicenseDate ? new Date(lastLicenseDate).toISOString() : null,
           prevScores,
@@ -733,12 +530,6 @@ export default function InspectionFormPage() {
           impoundedBy: (formData.impoundedBy || '').trim(),
           impoundmentDate: new Date(formData.date).toISOString(),
           reason: impoundReason || '',
-        },
-        _stats: {
-          coldAnswered: Object.values(coldAnswers).filter((v) => v !== '').length,
-          coldTotal: COLDCHAIN_SECTIONS.flatMap((s) => s.items).length,
-          outletAnswered: Object.values(outletAnswers).filter((v) => v !== '').length,
-          outletTotal: DRUGOUTLET_ITEMS.length,
         },
       };
 
@@ -807,12 +598,6 @@ export default function InspectionFormPage() {
     });
     setErrors({});
     setFormErrors([]);
-    setColdAnswers({});
-    setQualification('');
-    setRecommendations('');
-    setFacilityRepName('');
-    setFacilityRepContact('');
-    setOutletAnswers({});
     setLastVisit('');
     setLastLicenseDate('');
     setPrevScores('');
@@ -844,10 +629,10 @@ export default function InspectionFormPage() {
           </div>
           <div>
             <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">
-              NDA Inspection — Expanded
+              NDA Inspection — Trimmed
             </h1>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Complete all sections, then submit.
+              Complete the remaining sections, then submit.
             </p>
           </div>
         </div>
@@ -923,16 +708,16 @@ export default function InspectionFormPage() {
             </div>
           </Accordion>
 
-            {/* Drugshop */}
+          {/* Facility */}
           <Accordion
             id="drugshop"
-            title="Drugshop Information"
+            title="Drug Facility Information"
             icon={<Briefcase className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
             open={open.drugshop}
             toggleOpen={toggleOpen}
           >
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Drugshop Name *" error={errors.drugshopName}>
+              <Field label="Facility Name *" error={errors.drugshopName}>
                 <input
                   value={formData.drugshopName}
                   onChange={(e) => handleChange('drugshopName', e.target.value)}
@@ -942,7 +727,7 @@ export default function InspectionFormPage() {
               </Field>
 
               <Field
-                label="Drugshop Contact Phone(s) (comma-separated)"
+                label="Facility Contact Phone(s) (comma-separated)"
                 hint="If SMS is enabled and boxes > 0, phones must be valid."
                 error={errors.drugshopContactPhones}
               >
@@ -1015,181 +800,12 @@ export default function InspectionFormPage() {
                     onChange={(e) => handleChange('sendSms', e.target.checked)}
                     className="h-4 w-4 mt-0.5"
                   />
-                  <span>Send SMS to Drugshop Contact(s) on submit</span>
+                  <span>Send SMS to Facility Contact(s) on submit</span>
                 </label>
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                   SMS sent only if <strong>Boxes Impounded &gt; 0</strong> and contact phone(s) are provided.
                 </p>
               </div>
-            </div>
-          </Accordion>
-
-          {/* Cold chain — Equipment */}
-          <Accordion
-            id="coldEquip"
-            title="Cold Chain — Handling Equipment"
-            icon={<ClipboardList className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
-            open={open.coldEquip}
-            toggleOpen={toggleOpen}
-            badge={
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500 dark:text-slate-400">
-                  {Object.values(coldAnswers).filter((v) => v !== '').length}/{COLDCHAIN_SECTIONS.flatMap((s) => s.items).length}
-                </span>
-                <div className="w-24">
-                  <ProgressBar
-                    pct={
-                      COLDCHAIN_SECTIONS.flatMap((s) => s.items).length
-                        ? Math.round(
-                            (Object.values(coldAnswers).filter((v) => v !== '').length /
-                              COLDCHAIN_SECTIONS.flatMap((s) => s.items).length) *
-                              100
-                          )
-                        : 0
-                    }
-                  />
-                </div>
-              </div>
-            }
-          >
-            <div className="space-y-3">
-              {COLDCHAIN_SECTIONS[0].items.map((it) => (
-                <Row key={it.key} idx={it.key} label={it.label}>
-                  <YesNoToggle
-                    value={coldAnswers[it.key] || ''}
-                    onChange={(v) => setColdAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))}
-                  />
-                </Row>
-              ))}
-            </div>
-          </Accordion>
-
-          {/* Cold chain — Records */}
-          <Accordion
-            id="coldRecord"
-            title="Cold Chain — Storage, Status & Records"
-            icon={<ClipboardList className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
-            open={open.coldRecord}
-            toggleOpen={toggleOpen}
-            badge={
-              <div className="w-24">
-                <ProgressBar
-                  pct={
-                    COLDCHAIN_SECTIONS.flatMap((s) => s.items).length
-                      ? Math.round(
-                          (Object.values(coldAnswers).filter((v) => v !== '').length /
-                            COLDCHAIN_SECTIONS.flatMap((s) => s.items).length) *
-                            100
-                        )
-                      : 0
-                  }
-                />
-              </div>
-            }
-          >
-            <div className="space-y-3">
-              {COLDCHAIN_SECTIONS[1].items.map((it) => (
-                <Row key={it.key} idx={it.key} label={it.label}>
-                  <YesNoToggle
-                    value={coldAnswers[it.key] || ''}
-                    onChange={(v) => setColdAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))}
-                  />
-                </Row>
-              ))}
-            </div>
-          </Accordion>
-
-          {/* Cold chain — Qualification & signatures */}
-          <Accordion
-            id="coldQualSig"
-            title="Academic Qualification, Recommendations & Signatures"
-            icon={<FileSignature className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
-            open={open.coldQualSig}
-            toggleOpen={toggleOpen}
-          >
-            <div className="grid grid-cols-1 gap-4">
-              <Field label="Qualification *" error={errors.qualification}>
-                <input
-                  value={qualification}
-                  onChange={(e) => setQualification(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
-                  placeholder="e.g., Diploma in Pharmacy"
-                />
-              </Field>
-              <Field label="Recommendations / Actions">
-                <textarea
-                  value={recommendations}
-                  onChange={(e) => setRecommendations(e.target.value)}
-                  rows={3}
-                  className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
-                  placeholder="Optional notes or actions"
-                />
-              </Field>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Facility Representative Name">
-                  <input
-                    value={facilityRepName}
-                    onChange={(e) => setFacilityRepName(e.target.value)}
-                    className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
-                    placeholder="Full name"
-                  />
-                </Field>
-                <Field label="Facility Representative Contact">
-                  <input
-                    value={facilityRepContact}
-                    onChange={(e) => setFacilityRepContact(e.target.value)}
-                    className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
-                    placeholder="07xx xxx xxx"
-                  />
-                </Field>
-              </div>
-            </div>
-          </Accordion>
-
-          {/* Outlet checklist 1–10 */}
-          <Accordion
-            id="outletA"
-            title="Drug Outlet — Compliance Checklist (Items 1–10)"
-            icon={<ClipboardList className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
-            open={open.outletA}
-            toggleOpen={toggleOpen}
-            badge={
-              <div className="flex items-center gap-2">
-                <Percent className="h-4 w-4 text-slate-400" />
-                <span className="text-xs">{outletTotals.pct}%</span>
-              </div>
-            }
-          >
-            <div className="space-y-3">
-              {DRUGOUTLET_ITEMS.slice(0, 10).map((it) => (
-                <Row key={it.key} idx={it.key} label={it.label}>
-                  <YesNoToggle
-                    value={outletAnswers[it.key] || ''}
-                    onChange={(v) => setOutletAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))}
-                  />
-                </Row>
-              ))}
-            </div>
-          </Accordion>
-
-          {/* Outlet checklist 11–20 */}
-          <Accordion
-            id="outletB"
-            title="Drug Outlet — Compliance Checklist (Items 11–20)"
-            icon={<ClipboardList className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
-            open={open.outletB}
-            toggleOpen={toggleOpen}
-            badge={<div className="w-24"><ProgressBar pct={outletTotals.pct} /></div>}
-          >
-            <div className="space-y-3">
-              {DRUGOUTLET_ITEMS.slice(10, 20).map((it) => (
-                <Row key={it.key} idx={it.key} label={it.label}>
-                  <YesNoToggle
-                    value={outletAnswers[it.key] || ''}
-                    onChange={(v) => setOutletAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))}
-                  />
-                </Row>
-              ))}
             </div>
           </Accordion>
 
@@ -1278,40 +894,16 @@ export default function InspectionFormPage() {
           >
             <dl className="text-xs sm:text-sm grid grid-cols-1 gap-2 text-slate-700 dark:text-slate-300">
               <KV k="Date" v={formData.date || '—'} />
-              <KV k="Drugshop" v={formData.drugshopName || '—'} />
+              <KV k="Facility" v={formData.drugshopName || '—'} />
               <KV k="Boxes" v={String(boxesNum || 0)} />
               <KV k="Officer" v={formData.impoundedBy || '—'} />
               <KV k="Impound Reason" v={impoundReason || '—'} />
-              <KV k="Cold Chain Progress" v={`${coldTotals.pct}%`} />
-              <KV k="Outlet Progress" v={`${outletTotals.pct}%`} />
             </dl>
           </Accordion>
         </div>
 
         {/* Right rail */}
         <aside className="space-y-4 lg:space-y-6">
-          {/* Sticky progress */}
-          <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4 sticky top-4">
-            <header className="flex items-center gap-2 mb-2">
-              <Percent className="h-4 w-4 text-blue-700 dark:text-blue-300" />
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Form Progress</h3>
-            </header>
-            <div className="space-y-3">
-              <div>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span>Cold Chain</span><span className="font-semibold">{coldTotals.pct}%</span>
-                </div>
-                <ProgressBar pct={coldTotals.pct} />
-              </div>
-              <div>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span>Drug Outlet</span><span className="font-semibold">{outletTotals.pct}%</span>
-                </div>
-                <ProgressBar pct={outletTotals.pct} />
-              </div>
-            </div>
-          </section>
-
           {/* Tips */}
           <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
             <header className="flex items-center gap-2 mb-2">

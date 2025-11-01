@@ -41,20 +41,16 @@ type Inspection = {
   id: string;
   meta: {
     docNo?: string;
-    facilityName?: string; // web may not set this
-    drugshopName?: string; // web uses this
+    facilityName?: string; // web may store this
+    drugshopName?: string; // legacy key
     location?: string;
     district?: string;
     type?: FacilityType;
     date?: string; // ISO
     createdAt?: string | number;
   };
-  _stats?: {
-    coldAnswered?: number;
-    coldTotal?: number;
-    outletAnswered?: number;
-    outletTotal?: number;
-  };
+  // _stats removed from UI; kept optional for backward compatibility
+  _stats?: Record<string, unknown>;
 };
 
 /* ------------------------------------------------------------------ */
@@ -68,22 +64,6 @@ const TYPE_COLORS: Record<FacilityType, string> = {
   Public: '#F59E0B', // amber-500
   Private: '#8B5CF6', // violet-500
 };
-
-function calcPct(ans?: number, total?: number) {
-  if (!total || total <= 0 || !ans) return 0;
-  return Math.max(0, Math.min(100, Math.round((ans / total) * 100)));
-}
-
-function getProgressColor(p: number) {
-  if (p >= 80) return 'text-emerald-600';
-  if (p >= 50) return 'text-amber-600';
-  return 'text-rose-600';
-}
-function getBarColor(p: number) {
-  if (p >= 80) return 'bg-emerald-500';
-  if (p >= 50) return 'bg-amber-500';
-  return 'bg-rose-500';
-}
 
 function fmtDate(iso?: string | number) {
   if (!iso && iso !== 0) return '—';
@@ -100,7 +80,6 @@ function createdAtMs(meta?: Inspection['meta']) {
     const t = Date.parse(v);
     return isNaN(t) ? 0 : t;
   }
-  // Fallback: try meta.date
   if (meta?.date) {
     const t = Date.parse(meta.date);
     return isNaN(t) ? 0 : t;
@@ -152,10 +131,8 @@ export default function InspectionsPage() {
       (snap: DataSnapshot) => {
         const next: Inspection[] = [];
         snap.forEach((child) => {
-          next.push(mapChild(child)); // return void to satisfy RTDB forEach type
-          // return false; // (optional) explicitly continue
+          next.push(mapChild(child));
         });
-        // sort descending by createdAtMs
         next.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
         setItems(next);
 
@@ -185,8 +162,7 @@ export default function InspectionsPage() {
 
       const next: Inspection[] = [];
       snap.forEach((child) => {
-        next.push(mapChild(child)); // return void
-        // return false;
+        next.push(mapChild(child));
       });
       next.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
 
@@ -212,7 +188,7 @@ export default function InspectionsPage() {
         orderByChild('meta/createdAt'),
         endAt(
           typeof lastSeenOrderVal.current === 'number'
-            ? (lastSeenOrderVal.current as number) - 1 // go strictly older for numeric timestamps
+            ? (lastSeenOrderVal.current as number) - 1 // strictly older for numeric timestamps
             : (lastSeenOrderVal.current as string),
         ),
         limitToLast(PAGE_SIZE),
@@ -220,8 +196,7 @@ export default function InspectionsPage() {
       const snap = await get(q);
       const batch: Inspection[] = [];
       snap.forEach((child) => {
-        batch.push(mapChild(child)); // return void
-        // return false;
+        batch.push(mapChild(child));
       });
       batch.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
 
@@ -234,7 +209,6 @@ export default function InspectionsPage() {
           batch.forEach((it) => {
             if (!seen.has(it.id)) merged.push(it);
           });
-          // keep global list sorted
           merged.sort((a, b) => createdAtMs(b.meta) - createdAtMs(a.meta));
           return merged;
         });
@@ -461,9 +435,6 @@ function InspectionCard({ item }: { item: Inspection }) {
   const title = m.facilityName || m.drugshopName || 'Unnamed Facility';
   const dateLabel = fmtDate(m.date || m.createdAt);
 
-  const coldPct = calcPct(item._stats?.coldAnswered, item._stats?.coldTotal);
-  const outletPct = calcPct(item._stats?.outletAnswered, item._stats?.outletTotal);
-
   const t = (m.type || 'Private') as FacilityType; // default visual
   const typeColor = TYPE_COLORS[t] || '#64748B';
 
@@ -529,29 +500,7 @@ function InspectionCard({ item }: { item: Inspection }) {
           <span>{dateLabel}</span>
         </div>
       </div>
-
-      {/* Progress */}
-      <div className="mt-4 space-y-3">
-        <ProgressRow label="Cold Chain" pct={coldPct} />
-        <ProgressRow label="Drug Outlet" pct={outletPct} />
-      </div>
     </article>
-  );
-}
-
-function ProgressRow({ label, pct }: { label: string; pct: number }) {
-  const txt = getProgressColor(pct);
-  const bar = getBarColor(pct);
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{label}</span>
-        <span className={`text-xs font-bold ${txt}`}>{pct}%</span>
-      </div>
-      <div className="h-1.5 w-full rounded bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
-        <div className={`h-1.5 rounded ${bar}`} style={{ width: `${pct}%` }} />
-      </div>
-    </div>
   );
 }
 
