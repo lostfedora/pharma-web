@@ -30,9 +30,7 @@ import {
 /* ------------------------------------------------------------------ */
 /* Config (⚠️ move to server env in production)                       */
 /* ------------------------------------------------------------------ */
-const YOOLA_API_KEY =
-  process.env.NEXT_PUBLIC_YOOLA_API_KEY ||
-  'xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00';
+const YOOLA_API_KEY = 'xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00';
 
 /* ------------------------------------------------------------------ */
 /* Static data                                                        */
@@ -314,7 +312,7 @@ export default function InspectionFormPage() {
     return unsub;
   }, [auth, router]);
 
-  // Autosave/restore (trimmed to current fields)
+  // Autosave/restore
   useEffect(() => {
     const raw = localStorage.getItem('inspection-autosave');
     if (!raw) return;
@@ -629,7 +627,7 @@ export default function InspectionFormPage() {
           </div>
           <div>
             <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">
-              NDA Inspection — Trimmed
+              NDA Inspection
             </h1>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
               Complete the remaining sections, then submit.
