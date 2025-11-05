@@ -28,12 +28,12 @@ import {
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ */
-/* Config (⚠️ move to server env in production)                       */
+/* Config — keep secrets server-side in production                     */
 /* ------------------------------------------------------------------ */
-const YOOLA_API_KEY = 'xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00';
+const YOOLA_API_KEY = "xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00"
 
 /* ------------------------------------------------------------------ */
-/* Static data                                                        */
+/* Static data                                                         */
 /* ------------------------------------------------------------------ */
 type ImpoundReason =
   | 'Unsuitable premises'
@@ -48,14 +48,40 @@ const IMPOUND_REASONS: ImpoundReason[] = [
   'Unlicensed',
 ];
 
+// Compliance checklist (we define all 20 for future; render 1–10 now)
+type YesNo = '' | 'yes' | 'no';
+const DRUGOUTLET_ITEMS: { key: string; label: string }[] = [
+  { key: '01', label: 'Valid Operating license for current year available?' },
+  { key: '02', label: 'Displayed current license & certificate of suitability?' },
+  { key: '03', label: 'Attendant qualified & registered?' },
+  { key: '04', label: 'Valid annual practicing licenses displayed?' },
+  { key: '05', label: 'Evidence of prescription records?' },
+  { key: '06', label: 'Permanent building with well-painted walls?' },
+  { key: '07', label: 'Proper ceiling (plywood/concrete) present?' },
+  { key: '08', label: 'Cemented/tiled floor easy to clean?' },
+  { key: '09', label: 'Premises clean & organized?' },
+  { key: '10', label: 'Authorized SOPs present (Pharmacies)?' },
+  { key: '11', label: 'Shelves not overstocked/congested?' },
+  { key: '12', label: 'Light-sensitive products protected from light?' },
+  { key: '13', label: 'Designated area for expired/damaged drugs?' },
+  { key: '14', label: 'Records for expired/damaged drugs?' },
+  { key: '15', label: 'No improper handling/misuse of drugs?' },
+  { key: '16', label: 'Temperature & humidity device present?' },
+  { key: '17', label: 'Daily temperature records maintained?' },
+  { key: '18', label: 'Up-to-date purchase & sales records?' },
+  { key: '19', label: 'Functional hand-washing unit available?' },
+  { key: '20', label: 'Clear signpost matching NDA license?' },
+];
+
 /* ------------------------------------------------------------------ */
-/* Helpers                                                            */
+/* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 type Coords = { latitude: number; longitude: number } | null;
 type ThemeMode = 'light' | 'dark' | 'system';
 
 const phoneTokenRe = /^\+?\d{7,15}$/;
-const normalizePhones = (raw: string) => raw.split(',').map((p) => p.trim()).filter(Boolean);
+const normalizePhones = (raw: string) =>
+  raw.split(',').map((p) => p.trim()).filter(Boolean);
 const validatePhones = (raw: string) => {
   const tokens = normalizePhones(raw);
   if (tokens.length === 0) return 'Enter at least one phone number';
@@ -72,6 +98,7 @@ function applyTheme(mode: ThemeMode) {
     root.classList.toggle('dark', mode === 'dark');
   }
 }
+
 function useTheme() {
   const [mode, setMode] = useState<ThemeMode>('system');
   useEffect(() => {
@@ -94,7 +121,7 @@ function useTheme() {
   return { mode, setMode: update };
 }
 
-// Hidden counters (not shown in UI but stored in meta)
+// Counter helpers
 const formatDoc = (n: number) => `DOC${String(n).padStart(7, '0')}`;
 const formatSerial = (n: number) => `SN${String(n).padStart(6, '0')}`;
 async function reserveNumbers(db: ReturnType<typeof getDatabase>) {
@@ -109,7 +136,7 @@ async function reserveNumbers(db: ReturnType<typeof getDatabase>) {
   return { docNo: formatDoc(doc), serialNo: formatSerial(serial) };
 }
 
-/* ---------- Error helpers & guarded push (timeout + offline) ------ */
+// Error helpers & guarded push
 function friendlyError(err: any): string {
   const code: string | undefined =
     err?.code || err?.error?.code || err?.name || (typeof err === 'string' ? err : undefined);
@@ -119,15 +146,11 @@ function friendlyError(err: any): string {
   if (code?.includes('PERMISSION_DENIED') || msg?.toLowerCase().includes('permission')) {
     return 'Permission denied. Your account may not be allowed to write to this path.';
   }
-  if (!navigator.onLine) {
-    return 'You are offline. Please reconnect to the internet and try again.';
-  }
+  if (!navigator.onLine) return 'You are offline. Please reconnect to the internet and try again.';
   if (msg?.toLowerCase().includes('network') || code?.toLowerCase().includes('network')) {
     return 'Network error while submitting. Please check your connection and retry.';
   }
-  if (msg?.toLowerCase().includes('timeout')) {
-    return 'Submission timed out. Connection might be slow—please retry.';
-  }
+  if (msg?.toLowerCase().includes('timeout')) return 'Submission timed out. Connection might be slow—please retry.';
   return msg || 'Unknown error occurred.';
 }
 
@@ -140,7 +163,7 @@ async function pushWithGuard(dbRef: ReturnType<typeof ref>, payload: any) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Memoized UI atoms                                                  */
+/* Small UI Atoms                                                      */
 /* ------------------------------------------------------------------ */
 const Accordion = React.memo(function Accordion({
   id,
@@ -243,8 +266,63 @@ const ThemeButton = React.memo(function ThemeButton({
   );
 });
 
+const YesNoToggle = React.memo(function YesNoToggle({
+  value,
+  onChange,
+}: {
+  value: YesNo;
+  onChange: (v: YesNo) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Yes or No"
+      className="inline-flex rounded-lg border border-slate-300 dark:border-slate-700 overflow-hidden"
+    >
+      <button
+        type="button"
+        onClick={() => onChange('yes')}
+        className={`px-3 py-1.5 text-sm ${
+          value === 'yes' ? 'bg-emerald-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
+        }`}
+      >
+        Yes
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('no')}
+        className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${
+          value === 'no' ? 'bg-rose-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
+        }`}
+      >
+        No
+      </button>
+    </div>
+  );
+});
+
+const Row = React.memo(function Row({
+  idx,
+  label,
+  children,
+}: {
+  idx: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+        <span className="text-blue-700 dark:text-blue-300 font-bold mr-1">{idx}</span>
+        {label}
+      </p>
+      <div>{children}</div>
+    </div>
+  );
+});
+
 /* ------------------------------------------------------------------ */
-/* Component                                                          */
+/* Component                                                           */
 /* ------------------------------------------------------------------ */
 export default function InspectionFormPage() {
   const db = primaryDb ?? getDatabase(primaryApp);
@@ -257,8 +335,8 @@ export default function InspectionFormPage() {
 
   const [formData, setFormData] = useState({
     date: new Date().toISOString().slice(0, 10),
-    docNo: '',           // hidden
-    serialNumber: '',    // hidden
+    docNo: '',
+    serialNumber: '',
     drugshopName: '',
     drugshopContactPhones: '',
     boxesImpounded: '',
@@ -278,13 +356,17 @@ export default function InspectionFormPage() {
   const [districtRepPresent, setDistrictRepPresent] = useState(false);
   const [impoundReason, setImpoundReason] = useState<ImpoundReason | ''>('');
 
+  // Compliance checklist answers
+  const [outletAnswers, setOutletAnswers] = useState<Record<string, YesNo>>({});
+
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLocating, setIsLocating] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({
     details: true,
-    drugshop: true,     // section id kept; title changed below
+    drugshop: true,
     impound: true,
+    outletA: true, // make checklist visible by default
     visitSig: true,
     review: true,
   });
@@ -312,7 +394,7 @@ export default function InspectionFormPage() {
     return unsub;
   }, [auth, router]);
 
-  // Autosave/restore
+  // Autosave restore
   useEffect(() => {
     const raw = localStorage.getItem('inspection-autosave');
     if (!raw) return;
@@ -327,9 +409,11 @@ export default function InspectionFormPage() {
       setInChargeContact(p.inChargeContact || '');
       setDistrictRepPresent(!!p.districtRepPresent);
       setImpoundReason(p.impoundReason || '');
+      setOutletAnswers(p.outletAnswers || {});
     } catch {}
   }, []);
 
+  // Autosave persist
   useEffect(() => {
     const payload = {
       formData,
@@ -341,6 +425,7 @@ export default function InspectionFormPage() {
       inChargeContact,
       districtRepPresent,
       impoundReason,
+      outletAnswers,
     };
     localStorage.setItem('inspection-autosave', JSON.stringify(payload));
   }, [
@@ -353,9 +438,10 @@ export default function InspectionFormPage() {
     inChargeContact,
     districtRepPresent,
     impoundReason,
+    outletAnswers,
   ]);
 
-  // Reserve numbers on first mount if not present
+  // Reserve numbers initially
   useEffect(() => {
     (async () => {
       if (!formData.docNo || !formData.serialNumber) {
@@ -403,7 +489,10 @@ export default function InspectionFormPage() {
       });
       const coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       handleChange('location', coords);
-      handleChange('locationAddress', `Lat ${coords.latitude.toFixed(6)}, Lng ${coords.longitude.toFixed(6)}`);
+      handleChange(
+        'locationAddress',
+        `Lat ${coords.latitude.toFixed(6)}, Lng ${coords.longitude.toFixed(6)}`
+      );
     } catch (e: any) {
       console.error(e);
       alert('Could not determine your location. Please try again.');
@@ -415,7 +504,13 @@ export default function InspectionFormPage() {
   /* ---------------- SMS ---------------- */
   async function sendImpoundSms(
     phonesCsv: string,
-    payload: { serialNumber: string; drugshopName: string; boxesImpounded: string; dateIso: string; impoundedBy: string }
+    payload: {
+      serialNumber: string;
+      drugshopName: string;
+      boxesImpounded: string;
+      dateIso: string;
+      impoundedBy: string;
+    }
   ) {
     const dt = new Date(payload.dateIso);
     const when = isNaN(dt.getTime())
@@ -432,6 +527,7 @@ export default function InspectionFormPage() {
       `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
       `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`;
 
+    if (!YOOLA_API_KEY) throw new Error('SMS key is not configured.');
     const res = await fetch('https://yoolasms.com/api/v1/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -450,21 +546,18 @@ export default function InspectionFormPage() {
     const summary: string[] = [];
     let ok = true;
 
-    // Required: Facility Name
     if (!formData.drugshopName?.trim()) {
       next.drugshopName = 'This field is required';
       summary.push('facilityName: required');
       ok = false;
     }
 
-    // Optional numeric check
     if (formData.boxesImpounded && !/^\d+$/.test(formData.boxesImpounded.trim())) {
       next.boxesImpounded = 'Enter a valid number';
       summary.push('boxesImpounded: must be a number');
       ok = false;
     }
 
-    // Conditional phone validation
     if (formData.sendSms && boxesNum > 0) {
       const err = validatePhones(formData.drugshopContactPhones || '');
       if (err) {
@@ -514,6 +607,12 @@ export default function InspectionFormPage() {
 
       const payload = {
         meta,
+        outlet: {
+          // Only saving 1–10 answers for now (the section we render)
+          answers: Object.fromEntries(
+            DRUGOUTLET_ITEMS.slice(0, 10).map((q) => [q.key, outletAnswers[q.key] || ''])
+          ),
+        },
         visit: {
           lastVisit: lastVisit ? new Date(lastVisit).toISOString() : null,
           lastLicenseDate: lastLicenseDate ? new Date(lastLicenseDate).toISOString() : null,
@@ -531,7 +630,6 @@ export default function InspectionFormPage() {
         },
       };
 
-      // Unified path for both web & mobile
       const submissionsRef = ref(db, 'ndachecklists/submissions');
       await pushWithGuard(submissionsRef, payload);
 
@@ -556,7 +654,6 @@ export default function InspectionFormPage() {
 
       localStorage.removeItem('inspection-autosave');
       await hardReset();
-
     } catch (err: any) {
       console.error('Submission failed:', err);
       const reason = friendlyError(err);
@@ -565,7 +662,9 @@ export default function InspectionFormPage() {
         `Reason: ${reason}`,
         'Tip: Ensure you are online and signed in. If the problem continues, contact the admin to check Firebase rules.',
       ]);
-      alert(`Submission failed.\n\nReason: ${reason}\n\nTip: Ensure you are online and signed in, then try again.`);
+      alert(
+        `Submission failed.\n\nReason: ${reason}\n\nTip: Ensure you are online and signed in, then try again.`
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -604,6 +703,7 @@ export default function InspectionFormPage() {
     setInChargeContact('');
     setDistrictRepPresent(false);
     setImpoundReason('');
+    setOutletAnswers({});
   }
 
   if (authChecking) {
@@ -690,17 +790,30 @@ export default function InspectionFormPage() {
                     disabled={isLocating}
                     className="inline-flex items-center gap-2 rounded-xl bg-blue-800 text-white px-3 py-2 text-sm disabled:opacity-60"
                   >
-                    {isLocating ? (<><Loader2 className="h-4 w-4 animate-spin" /> Capturing…</>) : (<><Crosshair className="h-4 w-4" /> Capture Location</>)}
+                    {isLocating ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" /> Capturing…
+                      </>
+                    ) : (
+                      <>
+                        <Crosshair className="h-4 w-4" /> Capture Location
+                      </>
+                    )}
                   </button>
                   {formData.location && (
                     <div className="text-sm text-slate-700 dark:text-slate-300 flex items-center gap-2">
                       <MapPin className="h-4 w-4 text-blue-700 dark:text-blue-300" />
-                      <span>{formData.location.latitude.toFixed(6)}, {formData.location.longitude.toFixed(6)}</span>
+                      <span>
+                        {formData.location.latitude.toFixed(6)},{' '}
+                        {formData.location.longitude.toFixed(6)}
+                      </span>
                     </div>
                   )}
                 </div>
                 {!!formData.locationAddress && (
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{formData.locationAddress}</p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    {formData.locationAddress}
+                  </p>
                 )}
               </Field>
             </div>
@@ -751,7 +864,9 @@ export default function InspectionFormPage() {
               <Field label="Boxes Impounded" error={errors.boxesImpounded}>
                 <input
                   value={formData.boxesImpounded}
-                  onChange={(e) => handleChange('boxesImpounded', e.target.value.replace(/[^\d]/g, ''))}
+                  onChange={(e) =>
+                    handleChange('boxesImpounded', e.target.value.replace(/[^\d]/g, ''))
+                  }
                   className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/60"
                   placeholder="e.g., 2"
                   inputMode="numeric"
@@ -784,7 +899,9 @@ export default function InspectionFormPage() {
                       }`}
                     >
                       <span>{r}</span>
-                      {impoundReason === r ? <span className="text-blue-700 dark:text-blue-300">Selected</span> : null}
+                      {impoundReason === r ? (
+                        <span className="text-blue-700 dark:text-blue-300">Selected</span>
+                      ) : null}
                     </button>
                   ))}
                 </div>
@@ -801,9 +918,32 @@ export default function InspectionFormPage() {
                   <span>Send SMS to Facility Contact(s) on submit</span>
                 </label>
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  SMS sent only if <strong>Boxes Impounded &gt; 0</strong> and contact phone(s) are provided.
+                  SMS sent only if <strong>Boxes Impounded &gt; 0</strong> and contact phone(s) are
+                  provided.
                 </p>
               </div>
+            </div>
+          </Accordion>
+
+          {/* Compliance Checklist (Items 1–10) */}
+          <Accordion
+            id="outletA"
+            title="Drug Outlet — Compliance Checklist (Items 1–10)"
+            icon={<ClipboardList className="h-4 w-4 text-blue-700 dark:text-blue-300" />}
+            open={open.outletA}
+            toggleOpen={toggleOpen}
+          >
+            <div className="space-y-3">
+              {DRUGOUTLET_ITEMS.slice(0, 10).map((it) => (
+                <Row key={it.key} idx={it.key} label={it.label}>
+                  <YesNoToggle
+                    value={outletAnswers[it.key] || ''}
+                    onChange={(v) =>
+                      setOutletAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))
+                    }
+                  />
+                </Row>
+              ))}
             </div>
           </Accordion>
 
@@ -906,11 +1046,15 @@ export default function InspectionFormPage() {
           <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
             <header className="flex items-center gap-2 mb-2">
               <Info className="h-4 w-4 text-blue-700 dark:text-blue-300" />
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Submission Tips</h3>
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                Submission Tips
+              </h3>
             </header>
             <ul className="text-xs sm:text-sm space-y-2 text-slate-600 dark:text-slate-400">
               <li>• Capture GPS at the inspection site.</li>
-              <li>• Prefer <span className="font-mono">+256</span> format for phone numbers.</li>
+              <li>
+                • Prefer <span className="font-mono">+256</span> format for phone numbers.
+              </li>
               <li>• Double-check serial number and officer names.</li>
             </ul>
           </section>
@@ -936,7 +1080,15 @@ export default function InspectionFormPage() {
               disabled={isSubmitting}
               className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-800 text-white px-5 py-2.5 disabled:opacity-70"
             >
-              {isSubmitting ? (<><Loader2 className="h-4 w-4 animate-spin" /> Submitting…</>) : (<>Submit Report <Send className="h-4 w-4" /></>)}
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Submitting…
+                </>
+              ) : (
+                <>
+                  Submit Report <Send className="h-4 w-4" />
+                </>
+              )}
             </button>
           </section>
         </aside>

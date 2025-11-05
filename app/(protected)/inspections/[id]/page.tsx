@@ -20,10 +20,14 @@ import {
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ */
-/* Types (kept minimal; legacy keys still allowed)                     */
+/* Types (minimal; keep legacy keys)                                   */
 /* ------------------------------------------------------------------ */
 type FacilityType = 'Human' | 'Veterinary' | 'Public' | 'Private';
-type Coords = { latitude: number; longitude: number };
+
+type Coords = {
+  latitude: number | string;
+  longitude: number | string;
+};
 
 type Inspection = {
   id?: string;
@@ -32,8 +36,8 @@ type Inspection = {
     date?: string; // ISO
     serialNumber?: string;
     source?: 'web' | 'mobile' | string;
-    drugshopName?: string;       // legacy
-    facilityName?: string;       // preferred
+    drugshopName?: string; // legacy
+    facilityName?: string; // preferred
     drugshopContactPhones?: string;
     boxesImpounded?: string;
     impoundedBy?: string;
@@ -57,7 +61,7 @@ type Inspection = {
 };
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                            */
+/* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 function fmtDate(iso?: string | null) {
   if (!iso) return '—';
@@ -81,15 +85,32 @@ function fmtDateTime(isoOrNum?: string | number | null) {
       });
 }
 
+function safeCoordToFixed(v?: number | string, digits = 6) {
+  if (v == null) return null;
+  const n = typeof v === 'number' ? v : parseFloat(String(v));
+  if (!Number.isFinite(n)) return null;
+  return n.toFixed(digits);
+}
+
 /* ------------------------------------------------------------------ */
-/* UI atoms                                                           */
+/* UI atoms                                                            */
 /* ------------------------------------------------------------------ */
-function Section({ title, icon, children }: { title: string; icon?: React.ReactNode; children: React.ReactNode }) {
+function Section({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
       <header className="flex items-center gap-2 mb-3">
         {icon}
-        <h2 className="text-sm sm:text-base font-semibold text-slate-800 dark:text-slate-200">{title}</h2>
+        <h2 className="text-sm sm:text-base font-semibold text-slate-800 dark:text-slate-200">
+          {title}
+        </h2>
       </header>
       {children}
     </section>
@@ -100,16 +121,22 @@ function MetaRow({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex items-center justify-between gap-2 text-sm">
       <span className="text-slate-500 dark:text-slate-400">{k}</span>
-      <span className="font-medium text-slate-800 dark:text-slate-200">{v || '—'}</span>
+      <span className="font-medium text-slate-800 dark:text-slate-200">
+        {v || '—'}
+      </span>
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Page                                                               */
+/* Page                                                                */
 /* ------------------------------------------------------------------ */
 export default function InspectionDetailPage() {
-  const { id } = useParams<{ id: string }>();
+  // Robust param extraction (Next 15 may return string | string[])
+  const params = useParams();
+  const rawId = params?.['id'];
+  const id = Array.isArray(rawId) ? rawId[0] : (rawId as string | undefined);
+
   const router = useRouter();
   const db = primaryDb ?? getDatabase(primaryApp);
 
@@ -123,21 +150,17 @@ export default function InspectionDetailPage() {
     const unsub = onValue(
       r,
       (snap: DataSnapshot) => {
-        const v = snap.val() as Inspection | null;
-        if (!v) {
-          setItem(null);
-        } else {
-          v.id = id;
-          setItem(v);
-        }
-        setLoading(false);
+        const v = (snap.val() as Inspection | null) || null;
+        if (v) v.id = id;
+        setItem(v);
         setLoadErr(null);
+        setLoading(false);
       },
       (err) => {
         console.error('read error', err);
         setLoadErr('Failed to load inspection.');
         setLoading(false);
-      }
+      },
     );
     return () => unsub();
   }, [db, id]);
@@ -153,7 +176,7 @@ export default function InspectionDetailPage() {
     );
   }
 
-  if (loadErr || !item) {
+  if (!id || loadErr || !item) {
     return (
       <main className="mx-auto w-full max-w-4xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
         <button
@@ -181,6 +204,10 @@ export default function InspectionDetailPage() {
   const m = item.meta ?? {};
   const title = m.facilityName || m.drugshopName || 'Inspection';
   const createdAtLabel = fmtDateTime(m.createdAt ?? item.createdAt ?? null);
+
+  const lat = safeCoordToFixed(m.location?.coordinates?.latitude);
+  const lng = safeCoordToFixed(m.location?.coordinates?.longitude);
+  const hasCoords = lat !== null && lng !== null;
 
   return (
     <main className="mx-auto w-full max-w-6xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
@@ -247,16 +274,22 @@ export default function InspectionDetailPage() {
               </div>
             </div>
 
-            {m.location?.coordinates ? (
+            {(hasCoords || m.location?.formattedAddress) && (
               <div className="mt-3 flex items-center gap-1.5 text-sm text-slate-700 dark:text-slate-300">
                 <MapPin className="h-4 w-4 text-slate-400" />
-                <span>
-                  {m.location.coordinates.latitude.toFixed(6)}, {m.location.coordinates.longitude.toFixed(6)}
-                </span>
-                <span className="text-slate-400">•</span>
-                <span className="truncate">{m.location.formattedAddress || '—'}</span>
+                {hasCoords ? (
+                  <span>
+                    {lat}, {lng}
+                  </span>
+                ) : null}
+                {m.location?.formattedAddress ? (
+                  <>
+                    {hasCoords ? <span className="text-slate-400">•</span> : null}
+                    <span className="truncate">{m.location.formattedAddress}</span>
+                  </>
+                ) : null}
               </div>
-            ) : null}
+            )}
           </Section>
 
           {/* Impoundment */}
