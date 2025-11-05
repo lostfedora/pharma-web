@@ -357,7 +357,7 @@ function DashboardPageInner() {
         </div>
         <div className="mt-2 sm:mt-0 flex gap-2">
           <Link
-            href="/inspection-form"
+            href="/inspections/new/"
             className="inline-flex items-center gap-2 rounded-xl bg-blue-600 text-white px-3 py-2 text-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <ClipboardList className="h-4 w-4" />
