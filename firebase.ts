@@ -1,20 +1,22 @@
-import { initializeApp } from 'firebase/app';
+// firebase.ts
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getDatabase } from 'firebase/database';
 
-
-// Your web app's Firebase configuration
+// Read your config from env (Next.js exposes NEXT_PUBLIC_* to browser)
 const firebaseConfig = {
-  apiKey: "AIzaSyA5a4xbvaEcoq7Saj4UHlLATFMOvHkt9u4",
-  authDomain: "the-link-e1700.firebaseapp.com",
-  databaseURL: "https://the-link-e1700-default-rtdb.firebaseio.com",
-  projectId: "the-link-e1700",
-  storageBucket: "the-link-e1700.appspot.com",
-  messagingSenderId: "1045613465175",
-  appId: "1:1045613465175:web:11e0e265f41e38ba535d12"
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN!,
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL!,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID!,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET!,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID!,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
 };
 
-const app = initializeApp(firebaseConfig);
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+
 export const auth = getAuth(app);
 export const database = getDatabase(app);
+
 export default app;

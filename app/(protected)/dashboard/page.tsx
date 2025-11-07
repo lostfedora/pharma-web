@@ -569,7 +569,7 @@ function DashboardPageInner() {
                     className="inline-flex items-center gap-1 rounded-xl border border-amber-300 dark:border-amber-700 px-3 py-2 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/20"
                   >
                     <Pill className="h-4 w-4" />
-                    Bounded
+                    Impounded
                   </Link>
                   <Link
                     href="/released-drugs"
