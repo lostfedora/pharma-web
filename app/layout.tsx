@@ -39,9 +39,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100`}
       >
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          {/* Top navigation (optional if you already render it per-page) */}
-          <Navbar />
-
           {/* Page content */}
           <main className="min-h-screen">{children}</main>
 
