@@ -1,4 +1,3 @@
-// app/inspection-form/page.tsx
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -25,12 +24,8 @@ import {
   ChevronRight,
   ShieldCheck,
   AlertTriangle,
+  MessageSquare,
 } from 'lucide-react';
-
-/* ------------------------------------------------------------------ */
-/* Config — keep secrets server-side in production                     */
-/* ------------------------------------------------------------------ */
-const YOOLA_API_KEY = "xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00"
 
 /* ------------------------------------------------------------------ */
 /* Static data                                                         */
@@ -48,7 +43,7 @@ const IMPOUND_REASONS: ImpoundReason[] = [
   'Unlicensed',
 ];
 
-// Compliance checklist (we define all 20 for future; render 1–10 now)
+// Compliance checklist (20 defined; render 1–10 now)
 type YesNo = '' | 'yes' | 'no';
 const DRUGOUTLET_ITEMS: { key: string; label: string }[] = [
   { key: '01', label: 'Valid Operating license for current year available?' },
@@ -79,16 +74,40 @@ const DRUGOUTLET_ITEMS: { key: string; label: string }[] = [
 type Coords = { latitude: number; longitude: number } | null;
 type ThemeMode = 'light' | 'dark' | 'system';
 
-const phoneTokenRe = /^\+?\d{7,15}$/;
+function todayLocalYYYYMMDD() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+}
+
+/* -------- Phone helpers (UG +2567… normalization) -------- */
+const ugPhoneReCanonical = /^\+2567\d{8}$/;       // +2567XXXXXXXX
+const ugPhoneAcceptable = /^(?:\+?256|256|0)7\d{8}$/; // +2567..., 2567..., 07...
+
 const normalizePhones = (raw: string) =>
-  raw.split(',').map((p) => p.trim()).filter(Boolean);
-const validatePhones = (raw: string) => {
+  raw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+function normalizeUgPhone(p: string) {
+  let s = p.replace(/\s+/g, '');
+  if (ugPhoneReCanonical.test(s)) return s;            // +2567XXXXXXXX
+  if (/^2567\d{8}$/.test(s)) return `+${s}`;           // 2567XXXXXXXX -> +2567XXXXXXXX
+  if (/^07\d{8}$/.test(s)) return `+256${s.slice(1)}`; // 07XXXXXXXX -> +2567XXXXXXXX
+  return s; // leave as-is; upstream may reject invalids
+}
+
+function validatePhones(raw: string) {
   const tokens = normalizePhones(raw);
   if (tokens.length === 0) return 'Enter at least one phone number';
-  for (const t of tokens) if (!phoneTokenRe.test(t)) return `Invalid phone: ${t}`;
+  for (const t of tokens) {
+    const norm = normalizeUgPhone(t);
+    if (!ugPhoneAcceptable.test(norm)) return `Invalid phone: ${t}`;
+  }
   return null;
-};
+}
 
+/* -------- Theme -------- */
 function applyTheme(mode: ThemeMode) {
   const root = document.documentElement;
   if (mode === 'system') {
@@ -98,7 +117,6 @@ function applyTheme(mode: ThemeMode) {
     root.classList.toggle('dark', mode === 'dark');
   }
 }
-
 function useTheme() {
   const [mode, setMode] = useState<ThemeMode>('system');
   useEffect(() => {
@@ -121,7 +139,7 @@ function useTheme() {
   return { mode, setMode: update };
 }
 
-// Counter helpers
+/* -------- Counters -------- */
 const formatDoc = (n: number) => `DOC${String(n).padStart(7, '0')}`;
 const formatSerial = (n: number) => `SN${String(n).padStart(6, '0')}`;
 async function reserveNumbers(db: ReturnType<typeof getDatabase>) {
@@ -136,7 +154,7 @@ async function reserveNumbers(db: ReturnType<typeof getDatabase>) {
   return { docNo: formatDoc(doc), serialNo: formatSerial(serial) };
 }
 
-// Error helpers & guarded push
+/* -------- Error helpers & guarded push -------- */
 function friendlyError(err: any): string {
   const code: string | undefined =
     err?.code || err?.error?.code || err?.name || (typeof err === 'string' ? err : undefined);
@@ -146,20 +164,63 @@ function friendlyError(err: any): string {
   if (code?.includes('PERMISSION_DENIED') || msg?.toLowerCase().includes('permission')) {
     return 'Permission denied. Your account may not be allowed to write to this path.';
   }
-  if (!navigator.onLine) return 'You are offline. Please reconnect to the internet and try again.';
+  if (typeof navigator !== 'undefined' && !navigator.onLine)
+    return 'You are offline. Please reconnect and try again.';
+  if (msg?.toLowerCase().includes('timeout')) return 'Timed out. Connection might be slow—please retry.';
   if (msg?.toLowerCase().includes('network') || code?.toLowerCase().includes('network')) {
-    return 'Network error while submitting. Please check your connection and retry.';
+    return 'Network error while sending request.';
   }
-  if (msg?.toLowerCase().includes('timeout')) return 'Submission timed out. Connection might be slow—please retry.';
   return msg || 'Unknown error occurred.';
 }
 
 async function pushWithGuard(dbRef: ReturnType<typeof ref>, payload: any) {
-  if (!navigator.onLine) throw new Error('Offline');
+  if (typeof navigator !== 'undefined' && !navigator.onLine) throw new Error('Offline');
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error('Timeout: push took too long')), 20000)
   );
   return await Promise.race([push(dbRef, payload), timeout]);
+}
+
+/* -------- SMS (via our secure Next.js API) -------- */
+async function sendImpoundSms(
+  phonesCsv: string,
+  payload: {
+    serialNumber: string;
+    drugshopName: string;
+    boxesImpounded: string;
+    dateIso: string;
+    impoundedBy: string;
+  }
+) {
+  const dt = new Date(payload.dateIso);
+  const when = isNaN(dt.getTime())
+    ? payload.dateIso
+    : dt.toLocaleString('en-UG', {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+  const message =
+    `Dear ${payload.drugshopName || 'Facility'}, ` +
+    `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
+    `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`;
+
+  const normalizedPhones = normalizePhones(phonesCsv).map(normalizeUgPhone).join(',');
+
+  const res = await fetch('/api/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: normalizedPhones, message }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`SMS failed (${res.status}): ${text || 'Unknown error'}`);
+  }
+  return res.json().catch(() => ({}));
 }
 
 /* ------------------------------------------------------------------ */
@@ -332,18 +393,19 @@ export default function InspectionFormPage() {
 
   const [authChecking, setAuthChecking] = useState(true);
   const [formErrors, setFormErrors] = useState<string[]>([]);
+  const [lastSmsResult, setLastSmsResult] = useState<any | null>(null);
 
   const [formData, setFormData] = useState({
-    date: new Date().toISOString().slice(0, 10),
+    date: todayLocalYYYYMMDD(), // auto-filled to today; user can adjust
     docNo: '',
     serialNumber: '',
     drugshopName: '',
     drugshopContactPhones: '',
+    sendSms: true,
     boxesImpounded: '',
     impoundedBy: '',
     location: null as Coords,
     locationAddress: '',
-    sendSms: true,
   });
 
   const [lastVisit, setLastVisit] = useState<string>('');
@@ -354,9 +416,11 @@ export default function InspectionFormPage() {
   const [inChargeName, setInChargeName] = useState('');
   const [inChargeContact, setInChargeContact] = useState('');
   const [districtRepPresent, setDistrictRepPresent] = useState(false);
-  const [impoundReason, setImpoundReason] = useState<ImpoundReason | ''>('');
 
-  // Compliance checklist answers
+  // Multiple reasons
+  const [impoundReasons, setImpoundReasons] = useState<ImpoundReason[]>([]);
+
+  // Compliance answers
   const [outletAnswers, setOutletAnswers] = useState<Record<string, YesNo>>({});
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -366,7 +430,7 @@ export default function InspectionFormPage() {
     details: true,
     drugshop: true,
     impound: true,
-    outletA: true, // make checklist visible by default
+    outletA: true,
     visitSig: true,
     review: true,
   });
@@ -408,7 +472,7 @@ export default function InspectionFormPage() {
       setInChargeName(p.inChargeName || '');
       setInChargeContact(p.inChargeContact || '');
       setDistrictRepPresent(!!p.districtRepPresent);
-      setImpoundReason(p.impoundReason || '');
+      setImpoundReasons(p.impoundReasons || []);
       setOutletAnswers(p.outletAnswers || {});
     } catch {}
   }, []);
@@ -424,7 +488,7 @@ export default function InspectionFormPage() {
       inChargeName,
       inChargeContact,
       districtRepPresent,
-      impoundReason,
+      impoundReasons,
       outletAnswers,
     };
     localStorage.setItem('inspection-autosave', JSON.stringify(payload));
@@ -437,7 +501,7 @@ export default function InspectionFormPage() {
     inChargeName,
     inChargeContact,
     districtRepPresent,
-    impoundReason,
+    impoundReasons,
     outletAnswers,
   ]);
 
@@ -489,55 +553,13 @@ export default function InspectionFormPage() {
       });
       const coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       handleChange('location', coords);
-      handleChange(
-        'locationAddress',
-        `Lat ${coords.latitude.toFixed(6)}, Lng ${coords.longitude.toFixed(6)}`
-      );
+      handleChange('locationAddress', `Lat ${coords.latitude.toFixed(6)}, Lng ${coords.longitude.toFixed(6)}`);
     } catch (e: any) {
       console.error(e);
       alert('Could not determine your location. Please try again.');
     } finally {
       setIsLocating(false);
     }
-  }
-
-  /* ---------------- SMS ---------------- */
-  async function sendImpoundSms(
-    phonesCsv: string,
-    payload: {
-      serialNumber: string;
-      drugshopName: string;
-      boxesImpounded: string;
-      dateIso: string;
-      impoundedBy: string;
-    }
-  ) {
-    const dt = new Date(payload.dateIso);
-    const when = isNaN(dt.getTime())
-      ? payload.dateIso
-      : dt.toLocaleString('en-UG', {
-          year: 'numeric',
-          month: 'short',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-    const message =
-      `Dear ${payload.drugshopName || 'Facility'}, ` +
-      `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
-      `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`;
-
-    if (!YOOLA_API_KEY) throw new Error('SMS key is not configured.');
-    const res = await fetch('https://yoolasms.com/api/v1/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: phonesCsv, message, api_key: YOOLA_API_KEY }),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SMS failed (${res.status}): ${text || 'Unknown error'}`);
-    }
-    return res.json().catch(() => ({}));
   }
 
   /* ---------------- Validation & Submit ---------------- */
@@ -574,9 +596,11 @@ export default function InspectionFormPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setLastSmsResult(null);
+
     if (!validateForm()) {
       const first = document.querySelector('[data-error="true"]');
-      first?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      (first as HTMLElement | null)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
 
@@ -608,7 +632,6 @@ export default function InspectionFormPage() {
       const payload = {
         meta,
         outlet: {
-          // Only saving 1–10 answers for now (the section we render)
           answers: Object.fromEntries(
             DRUGOUTLET_ITEMS.slice(0, 10).map((q) => [q.key, outletAnswers[q.key] || ''])
           ),
@@ -626,32 +649,31 @@ export default function InspectionFormPage() {
           totalBoxes: (formData.boxesImpounded || '').trim(),
           impoundedBy: (formData.impoundedBy || '').trim(),
           impoundmentDate: new Date(formData.date).toISOString(),
-          reason: impoundReason || '',
+          reasons: impoundReasons,
         },
       };
 
       const submissionsRef = ref(db, 'ndachecklists/submissions');
       await pushWithGuard(submissionsRef, payload);
 
+      // -------- SMS Notification (best-effort) --------
       if (formData.sendSms && boxesNum > 0 && formData.drugshopContactPhones.trim()) {
         try {
-          await sendImpoundSms(formData.drugshopContactPhones.trim(), {
+          const smsRes = await sendImpoundSms(formData.drugshopContactPhones.trim(), {
             serialNumber: meta.serialNumber,
             drugshopName: meta.drugshopName,
             boxesImpounded: meta.boxesImpounded,
             dateIso: meta.date,
             impoundedBy: meta.impoundedBy,
           });
-          alert('Submitted and SMS sent.');
+          setLastSmsResult(smsRes);
         } catch (smsErr: any) {
           console.warn('SMS error:', smsErr?.message || smsErr);
           setFormErrors((errs) => [...errs, `SMS delivery failed: ${friendlyError(smsErr)}`]);
-          alert('Submitted successfully. SMS delivery failed—please retry later.');
         }
-      } else {
-        alert('Inspection submitted.');
       }
 
+      alert('Inspection submitted.');
       localStorage.removeItem('inspection-autosave');
       await hardReset();
     } catch (err: any) {
@@ -662,9 +684,7 @@ export default function InspectionFormPage() {
         `Reason: ${reason}`,
         'Tip: Ensure you are online and signed in. If the problem continues, contact the admin to check Firebase rules.',
       ]);
-      alert(
-        `Submission failed.\n\nReason: ${reason}\n\nTip: Ensure you are online and signed in, then try again.`
-      );
+      alert(`Submission failed.\n\nReason: ${reason}\n\nTip: Ensure you are online and signed in, then try again.`);
     } finally {
       setIsSubmitting(false);
     }
@@ -682,19 +702,20 @@ export default function InspectionFormPage() {
     }
 
     setFormData({
-      date: new Date().toISOString().slice(0, 10),
+      date: todayLocalYYYYMMDD(),
       docNo,
       serialNumber: serialNo,
       drugshopName: '',
       drugshopContactPhones: '',
+      sendSms: true,
       boxesImpounded: '',
       impoundedBy: '',
       location: null,
       locationAddress: '',
-      sendSms: true,
     });
     setErrors({});
     setFormErrors([]);
+    setLastSmsResult(null);
     setLastVisit('');
     setLastLicenseDate('');
     setPrevScores('');
@@ -702,7 +723,7 @@ export default function InspectionFormPage() {
     setInChargeName('');
     setInChargeContact('');
     setDistrictRepPresent(false);
-    setImpoundReason('');
+    setImpoundReasons([]);
     setOutletAnswers({});
   }
 
@@ -717,6 +738,7 @@ export default function InspectionFormPage() {
     );
   }
 
+  /* ---------------- UI ---------------- */
   return (
     <main className="mx-auto w-full max-w-6xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
       {/* Top bar */}
@@ -726,9 +748,7 @@ export default function InspectionFormPage() {
             <ClipboardList className="h-5 w-5 text-blue-800 dark:text-blue-200" />
           </div>
           <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">
-              NDA Inspection
-            </h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">NDA Inspection</h1>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
               Complete the remaining sections, then submit.
             </p>
@@ -760,6 +780,21 @@ export default function InspectionFormPage() {
         </div>
       )}
 
+      {/* Success banner (SMS) */}
+      {lastSmsResult?.ok && lastSmsResult?.data?.status === 'success' && (
+        <div className="mb-4 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-200">
+          <div className="flex items-start gap-2">
+            <MessageSquare className="h-4 w-4 mt-0.5" />
+            <div>
+              <p className="font-semibold">SMS sent successfully.</p>
+              <p className="text-xs mt-1">
+                Recipients: <b>{lastSmsResult.data.recipients}</b> · Credits used: <b>{lastSmsResult.data.credits_used}</b>
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Grid */}
       <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
         {/* Left / main */}
@@ -777,6 +812,7 @@ export default function InspectionFormPage() {
                 <input
                   type="date"
                   value={formData.date}
+                  max={todayLocalYYYYMMDD()}
                   onChange={(e) => handleChange('date', e.target.value)}
                   className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/60"
                 />
@@ -804,16 +840,13 @@ export default function InspectionFormPage() {
                     <div className="text-sm text-slate-700 dark:text-slate-300 flex items-center gap-2">
                       <MapPin className="h-4 w-4 text-blue-700 dark:text-blue-300" />
                       <span>
-                        {formData.location.latitude.toFixed(6)},{' '}
-                        {formData.location.longitude.toFixed(6)}
+                        {formData.location.latitude.toFixed(6)}, {formData.location.longitude.toFixed(6)}
                       </span>
                     </div>
                   )}
                 </div>
                 {!!formData.locationAddress && (
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    {formData.locationAddress}
-                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{formData.locationAddress}</p>
                 )}
               </Field>
             </div>
@@ -839,7 +872,7 @@ export default function InspectionFormPage() {
 
               <Field
                 label="Facility Contact Phone(s) (comma-separated)"
-                hint="If SMS is enabled and boxes > 0, phones must be valid."
+                hint="If SMS is enabled and boxes > 0, phones must be valid (e.g., +2567…, 2567…, 07…)."
                 error={errors.drugshopContactPhones}
               >
                 <input
@@ -864,9 +897,7 @@ export default function InspectionFormPage() {
               <Field label="Boxes Impounded" error={errors.boxesImpounded}>
                 <input
                   value={formData.boxesImpounded}
-                  onChange={(e) =>
-                    handleChange('boxesImpounded', e.target.value.replace(/[^\d]/g, ''))
-                  }
+                  onChange={(e) => handleChange('boxesImpounded', e.target.value.replace(/[^\d]/g, ''))}
                   className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/60"
                   placeholder="e.g., 2"
                   inputMode="numeric"
@@ -883,27 +914,30 @@ export default function InspectionFormPage() {
               </Field>
 
               <div className="col-span-1 sm:col-span-2">
-                <label className="text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center gap-2 mb-2">
-                  <ShieldCheck className="h-4 w-4" /> Reason
+                <label className="flex items-center gap-2 mb-2 text-sm font-medium text-slate-800 dark:text-slate-200">
+                  <ShieldCheck className="h-4 w-4" /> Reasons (select all that apply)
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {IMPOUND_REASONS.map((r) => (
-                    <button
-                      type="button"
-                      key={r}
-                      onClick={() => setImpoundReason(r)}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${
-                        impoundReason === r
-                          ? 'border-blue-600 bg-blue-50 dark:bg-blue-900/20'
-                          : 'border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
-                      }`}
-                    >
-                      <span>{r}</span>
-                      {impoundReason === r ? (
-                        <span className="text-blue-700 dark:text-blue-300">Selected</span>
-                      ) : null}
-                    </button>
-                  ))}
+                  {IMPOUND_REASONS.map((r) => {
+                    const active = impoundReasons.includes(r);
+                    return (
+                      <button
+                        type="button"
+                        key={r}
+                        onClick={() =>
+                          setImpoundReasons((prev) => (prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r]))
+                        }
+                        className={`flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${
+                          active
+                            ? 'border-blue-600 bg-blue-50 dark:bg-blue-900/20'
+                            : 'border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        <span>{r}</span>
+                        {active ? <span className="text-blue-700 dark:text-blue-300">Selected</span> : null}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -915,11 +949,12 @@ export default function InspectionFormPage() {
                     onChange={(e) => handleChange('sendSms', e.target.checked)}
                     className="h-4 w-4 mt-0.5"
                   />
-                  <span>Send SMS to Facility Contact(s) on submit</span>
+                  <span className="inline-flex items-center gap-1">
+                    <MessageSquare className="h-4 w-4" /> Send SMS to Facility Contact(s) on submit
+                  </span>
                 </label>
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  SMS sent only if <strong>Boxes Impounded &gt; 0</strong> and contact phone(s) are
-                  provided.
+                  SMS is sent only if <strong>Boxes Impounded &gt; 0</strong> and valid contact numbers are provided.
                 </p>
               </div>
             </div>
@@ -938,9 +973,7 @@ export default function InspectionFormPage() {
                 <Row key={it.key} idx={it.key} label={it.label}>
                   <YesNoToggle
                     value={outletAnswers[it.key] || ''}
-                    onChange={(v) =>
-                      setOutletAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))
-                    }
+                    onChange={(v) => setOutletAnswers((s) => (s[it.key] === v ? s : { ...s, [it.key]: v }))}
                   />
                 </Row>
               ))}
@@ -1035,7 +1068,8 @@ export default function InspectionFormPage() {
               <KV k="Facility" v={formData.drugshopName || '—'} />
               <KV k="Boxes" v={String(boxesNum || 0)} />
               <KV k="Officer" v={formData.impoundedBy || '—'} />
-              <KV k="Impound Reason" v={impoundReason || '—'} />
+              <KV k="Phones" v={formData.drugshopContactPhones || '—'} />
+              <KV k="Notify (SMS)" v={formData.sendSms ? 'Yes' : 'No'} />
             </dl>
           </Accordion>
         </div>
@@ -1046,15 +1080,11 @@ export default function InspectionFormPage() {
           <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
             <header className="flex items-center gap-2 mb-2">
               <Info className="h-4 w-4 text-blue-700 dark:text-blue-300" />
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                Submission Tips
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Submission Tips</h3>
             </header>
             <ul className="text-xs sm:text-sm space-y-2 text-slate-600 dark:text-slate-400">
               <li>• Capture GPS at the inspection site.</li>
-              <li>
-                • Prefer <span className="font-mono">+256</span> format for phone numbers.
-              </li>
+              <li>• Prefer <span className="font-mono">+256</span> format for phone numbers.</li>
               <li>• Double-check serial number and officer names.</li>
             </ul>
           </section>
