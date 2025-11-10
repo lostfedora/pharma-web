@@ -1,3 +1,4 @@
+// app/(protected)/inspections/new/page.tsx
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -79,32 +80,80 @@ function todayLocalYYYYMMDD() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
 }
 
-/* -------- Phone helpers (UG +2567… normalization) -------- */
-const ugPhoneReCanonical = /^\+2567\d{8}$/;       // +2567XXXXXXXX
-const ugPhoneAcceptable = /^(?:\+?256|256|0)7\d{8}$/; // +2567..., 2567..., 07...
+/* -------- Phone + SMS helpers (UG) -------- */
+const ugReCanonical = /^\+2567\d{8}$/;
 
-const normalizePhones = (raw: string) =>
-  raw
+function splitCsv(s?: string) {
+  return (s || '')
     .split(',')
-    .map((p) => p.trim())
+    .map((x) => x.trim())
     .filter(Boolean);
+}
+function uniqueCsv(arr: string[]) {
+  return Array.from(new Set(arr)).join(',');
+}
 
 function normalizeUgPhone(p: string) {
-  let s = p.replace(/\s+/g, '');
-  if (ugPhoneReCanonical.test(s)) return s;            // +2567XXXXXXXX
-  if (/^2567\d{8}$/.test(s)) return `+${s}`;           // 2567XXXXXXXX -> +2567XXXXXXXX
+  const s = p.replace(/\s+/g, '');
+  if (ugReCanonical.test(s)) return s; // +2567XXXXXXXX
+  if (/^2567\d{8}$/.test(s)) return `+${s}`; // 2567XXXXXXXX -> +2567XXXXXXXX
   if (/^07\d{8}$/.test(s)) return `+256${s.slice(1)}`; // 07XXXXXXXX -> +2567XXXXXXXX
   return s; // leave as-is; upstream may reject invalids
 }
 
+/** Soft validation used for inline field errors only (doesn't over-block submit) */
 function validatePhones(raw: string) {
-  const tokens = normalizePhones(raw);
+  const tokens = splitCsv(raw);
   if (tokens.length === 0) return 'Enter at least one phone number';
   for (const t of tokens) {
     const norm = normalizeUgPhone(t);
-    if (!ugPhoneAcceptable.test(norm)) return `Invalid phone: ${t}`;
+    if (!/^\+?2567\d{8}$|^07\d{8}$/.test(norm)) {
+      return `Invalid phone: ${t}`;
+    }
   }
   return null;
+}
+
+/** Exact same contract as the working detail page helper */
+async function sendSms(toPhonesCsv: string, message: string) {
+  const normalized = splitCsv(toPhonesCsv).map(normalizeUgPhone);
+  const recipients = uniqueCsv(normalized);
+  const r = await fetch('/api/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: recipients, message }),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`SMS failed (${r.status}): ${text || 'Unknown error'}`);
+  }
+  return r.json().catch(() => ({}));
+}
+
+/** Build the impound message (same tone as detail page) */
+function buildImpoundMessage(payload: {
+  serialNumber: string;
+  drugshopName: string;
+  boxesImpounded: string;
+  dateIso: string;
+  impoundedBy: string;
+}) {
+  const dt = new Date(payload.dateIso);
+  const when = Number.isNaN(dt.getTime())
+    ? payload.dateIso
+    : dt.toLocaleString('en-UG', {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+  return (
+    `Dear ${payload.drugshopName || 'Facility'}, ` +
+    `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
+    `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`
+  );
 }
 
 /* -------- Theme -------- */
@@ -179,48 +228,6 @@ async function pushWithGuard(dbRef: ReturnType<typeof ref>, payload: any) {
     setTimeout(() => reject(new Error('Timeout: push took too long')), 20000)
   );
   return await Promise.race([push(dbRef, payload), timeout]);
-}
-
-/* -------- SMS (via our secure Next.js API) -------- */
-async function sendImpoundSms(
-  phonesCsv: string,
-  payload: {
-    serialNumber: string;
-    drugshopName: string;
-    boxesImpounded: string;
-    dateIso: string;
-    impoundedBy: string;
-  }
-) {
-  const dt = new Date(payload.dateIso);
-  const when = isNaN(dt.getTime())
-    ? payload.dateIso
-    : dt.toLocaleString('en-UG', {
-        year: 'numeric',
-        month: 'short',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-
-  const message =
-    `Dear ${payload.drugshopName || 'Facility'}, ` +
-    `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
-    `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`;
-
-  const normalizedPhones = normalizePhones(phonesCsv).map(normalizeUgPhone).join(',');
-
-  const res = await fetch('/api/sms', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phone: normalizedPhones, message }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`SMS failed (${res.status}): ${text || 'Unknown error'}`);
-  }
-  return res.json().catch(() => ({}));
 }
 
 /* ------------------------------------------------------------------ */
@@ -656,16 +663,17 @@ export default function InspectionFormPage() {
       const submissionsRef = ref(db, 'ndachecklists/submissions');
       await pushWithGuard(submissionsRef, payload);
 
-      // -------- SMS Notification (best-effort) --------
+      // -------- SMS Notification (best-effort; matches detail page) --------
       if (formData.sendSms && boxesNum > 0 && formData.drugshopContactPhones.trim()) {
         try {
-          const smsRes = await sendImpoundSms(formData.drugshopContactPhones.trim(), {
+          const msg = buildImpoundMessage({
             serialNumber: meta.serialNumber,
             drugshopName: meta.drugshopName,
             boxesImpounded: meta.boxesImpounded,
             dateIso: meta.date,
             impoundedBy: meta.impoundedBy,
           });
+          const smsRes = await sendSms(formData.drugshopContactPhones.trim(), msg);
           setLastSmsResult(smsRes);
         } catch (smsErr: any) {
           console.warn('SMS error:', smsErr?.message || smsErr);
