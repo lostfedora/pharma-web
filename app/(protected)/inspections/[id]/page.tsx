@@ -31,7 +31,7 @@ import {
 /* ------------------------------------------------------------------ */
 type FacilityType = 'Human' | 'Veterinary' | 'Public' | 'Private';
 type Coords = { latitude: number | string; longitude: number | string };
-type BoxStatus = 'Not yet in store' | 'In Store' | 'Released';
+type BoxStatus = 'Not yet in store' | 'In Store' | 'Released' | 'DESTROYED';
 
 type ReleaseForm = {
   releaseDate: string;
@@ -67,6 +67,7 @@ type Inspection = {
     impoundmentDate?: string; // ISO
     reason?: string;
     boxStatus?: BoxStatus;
+    destroyedDate?: string; // ISO (new)
   };
   releaseRecord?: ReleaseForm;
   createdAt?: number; // legacy numeric
@@ -102,6 +103,19 @@ function safeCoordToFixed(v?: number | string, digits = 6) {
   const n = typeof v === 'number' ? v : parseFloat(String(v));
   if (!Number.isFinite(n)) return null;
   return n.toFixed(digits);
+}
+
+function daysBetween(aIso?: string | null, bIso?: string | null) {
+  if (!aIso || !bIso) return null;
+  const a = new Date(aIso).getTime();
+  const b = new Date(bIso).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const diffMs = Math.max(0, b - a);
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+function nowIso() {
+  return new Date().toISOString();
 }
 
 function Section({
@@ -201,7 +215,12 @@ function buildReleaseMessage(item: Inspection, form: ReleaseForm) {
 /* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
-const BOX_STATUS_OPTIONS: BoxStatus[] = ['Not yet in store', 'In Store', 'Released'];
+const BOX_STATUS_OPTIONS: BoxStatus[] = [
+  'Not yet in store',
+  'In Store',
+  'Released',
+  'DESTROYED',
+];
 
 export default function InspectionDetailPage() {
   const params = useParams();
@@ -259,14 +278,14 @@ export default function InspectionDetailPage() {
     return () => unsub();
   }, [db, id]);
 
-  // Save status & notify when moved to "In Store"
+  // Save status & notify when moved to "In Store" (and confirm DESTROYED)
   async function saveBoxStatus() {
     if (!id || !item) return;
 
-    // Can't change anything once Released
-    if (currentStatus === 'Released') {
-      alert('Status is Released and cannot be changed.');
-      setStatusDraft('Released');
+    // Can't change anything once Released or DESTROYED
+    if (currentStatus === 'Released' || currentStatus === 'DESTROYED') {
+      alert(`Status is ${currentStatus} and cannot be changed.`);
+      setStatusDraft(currentStatus);
       return;
     }
 
@@ -277,6 +296,29 @@ export default function InspectionDetailPage() {
       return;
     }
 
+    // Confirm DESTROYED, write destroyedDate
+    if (statusDraft === 'DESTROYED') {
+      const ok = window.confirm(
+        'Mark these drugs as DESTROYED? This action is final and cannot be reversed.'
+      );
+      if (!ok) {
+        setStatusDraft(currentStatus);
+        return;
+      }
+      setSavingStatus(true);
+      try {
+        await update(ref(db, `ndachecklists/submissions/${id}/impoundment`), {
+          boxStatus: 'DESTROYED',
+          destroyedDate: nowIso(),
+        });
+        alert('Marked DESTROYED.');
+      } finally {
+        setSavingStatus(false);
+      }
+      return;
+    }
+
+    // Regular status save
     setSavingStatus(true);
     try {
       // 1) Update status
@@ -355,6 +397,54 @@ export default function InspectionDetailPage() {
     }
   }
 
+  // ---------- Days in store ----------
+  const m = item?.meta ?? {};
+  const imp = item?.impoundment ?? {};
+  const title = m.facilityName || m.drugshopName || 'Inspection';
+
+  const lat = safeCoordToFixed(m.location?.coordinates?.latitude);
+  const lng = safeCoordToFixed(m.location?.coordinates?.longitude);
+  const hasCoords = lat !== null && lng !== null;
+
+  // Define the end date for "days in store":
+  // - In Store: now
+  // - Released: release date
+  // - DESTROYED: destroyedDate (or now if missing)
+  // - Not yet in store: no days
+  const daysInStore = useMemo(() => {
+    const start = imp.impoundmentDate || (m.date as string) || null;
+    if (!start) return null;
+
+    if (imp.boxStatus === 'In Store') {
+      return daysBetween(start, nowIso());
+    }
+    if (imp.boxStatus === 'Released') {
+      const end = item?.releaseRecord?.releaseDate || null;
+      return daysBetween(start, end);
+    }
+    if (imp.boxStatus === 'DESTROYED') {
+      const end = imp.destroyedDate || nowIso();
+      return daysBetween(start, end);
+    }
+    return null; // Not yet in store
+  }, [imp.impoundmentDate, m.date, imp.boxStatus, item?.releaseRecord?.releaseDate, imp.destroyedDate]);
+
+  function ageBadge(d: number | null) {
+    if (d == null) return null;
+    // Color rules: <100 green, 100–140 orange, >180 red (141–180 neutral)
+    let cls =
+      'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200';
+    if (d < 100) cls = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200';
+    else if (d >= 100 && d <= 140) cls = 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-200';
+    else if (d > 180) cls = 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200';
+
+    return (
+      <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold ${cls}`}>
+        {d} day{d === 1 ? '' : 's'} in store
+      </span>
+    );
+  }
+
   if (loading) {
     return (
       <main className="min-h-[60vh] grid place-items-center px-4">
@@ -391,14 +481,6 @@ export default function InspectionDetailPage() {
     );
   }
 
-  const m = item.meta ?? {};
-  const imp = item.impoundment ?? {};
-  const title = m.facilityName || m.drugshopName || 'Inspection';
-
-  const lat = safeCoordToFixed(m.location?.coordinates?.latitude);
-  const lng = safeCoordToFixed(m.location?.coordinates?.longitude);
-  const hasCoords = lat !== null && lng !== null;
-
   return (
     <main className="mx-auto w-full max-w-6xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
       {/* Top bar */}
@@ -418,7 +500,7 @@ export default function InspectionDetailPage() {
           </div>
           <div>
             <h1 className="text-xl sm:text-2xl font-bold text-blue-800 dark:text-blue-200">
-              {title}
+              {m.facilityName || m.drugshopName || 'Inspection'}
             </h1>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
               Document: {m.docNo || item.id} • Created: {fmtDateTime(m.createdAt ?? item.createdAt ?? null)}
@@ -503,10 +585,15 @@ export default function InspectionDetailPage() {
                 v={fmtDate(imp.impoundmentDate || (m.date as string) || null)}
               />
               <MetaRow k="Box Status" v={imp.boxStatus || 'Not yet in store'} />
+              {/* Days in store badge */}
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="text-slate-500 dark:text-slate-400">Age</span>
+                <span>{ageBadge(daysInStore)}</span>
+              </div>
             </div>
 
-            {/* Status editor — hidden & guarded when Released */}
-            {currentStatus !== 'Released' && (
+            {/* Status editor — hidden & guarded when Released or DESTROYED */}
+            {currentStatus !== 'Released' && currentStatus !== 'DESTROYED' && (
               <div className="mt-4 flex items-center gap-2">
                 <select
                   value={statusDraft}
@@ -550,6 +637,7 @@ export default function InspectionDetailPage() {
             <div className="space-y-2">
               <MetaRow k="Inspection Date" v={fmtDate(m.date || null)} />
               <MetaRow k="Created" v={fmtDateTime(m.createdAt ?? item.createdAt ?? null)} />
+              {imp.destroyedDate && <MetaRow k="Destroyed" v={fmtDate(imp.destroyedDate)} />}
             </div>
           </Section>
         </aside>

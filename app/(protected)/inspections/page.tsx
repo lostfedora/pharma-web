@@ -14,6 +14,7 @@ import {
   get,
   onValue,
   DataSnapshot,
+  update,
 } from 'firebase/database';
 import primaryApp, { database as primaryDb } from '@/firebase';
 import {
@@ -31,6 +32,7 @@ import {
   ChevronDown,
   Locate,
   Info,
+  ShieldAlert,
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ */
@@ -38,6 +40,7 @@ import {
 /* ------------------------------------------------------------------ */
 
 type FacilityType = 'Human' | 'Veterinary' | 'Public' | 'Private';
+type BoxStatus = 'Not yet in store' | 'In Store' | 'Released' | 'DESTROYED';
 
 type LocationMeta =
   | {
@@ -51,6 +54,7 @@ type MetaBlock = {
   serialNumber?: string;
   facilityName?: string;
   drugshopName?: string;
+  drugshopContactPhones?: string;
   location?: LocationMeta;
   district?: string;
   type?: FacilityType;
@@ -65,6 +69,9 @@ type ImpoundmentBlock = {
   impoundedBy?: string;
   impoundmentDate?: string;
   reason?: string;
+  boxStatus?: BoxStatus;
+  destroyedDate?: string;
+  reminder100SentAt?: string; // set once we auto-notify (>100 days in store)
 } | null;
 
 type Inspection = {
@@ -86,6 +93,14 @@ const TYPE_COLORS: Record<FacilityType, string> = {
   Public: '#F59E0B',
   Private: '#8B5CF6',
 };
+
+const BOX_STATUS_OPTIONS: Array<'All' | BoxStatus> = [
+  'All',
+  'Not yet in store',
+  'In Store',
+  'Released',
+  'DESTROYED',
+];
 
 function fmtDate(iso?: string | number) {
   if (!iso && iso !== 0) return '—';
@@ -136,6 +151,66 @@ function mapChild(child: DataSnapshot): Inspection {
   };
 }
 
+function daysBetween(aIso?: string | null, bIso?: string | null) {
+  if (!aIso || !bIso) return null;
+  const a = new Date(aIso).getTime();
+  const b = new Date(bIso).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const diffMs = Math.max(0, b - a);
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+function nowIso() {
+  return new Date().toISOString();
+}
+
+/* -------- Phone helpers (UG) & SMS ---------- */
+const ugReCanonical = /^\+2567\d{8}$/;
+function normalizeUgPhone(p: string) {
+  const s = p.replace(/\s+/g, '');
+  if (ugReCanonical.test(s)) return s;
+  if (/^2567\d{8}$/.test(s)) return `+${s}`;
+  if (/^07\d{8}$/.test(s)) return `+256${s.slice(1)}`;
+  return s;
+}
+function splitCsv(s?: string) {
+  return (s || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+function uniqueCsv(arr: string[]) {
+  return Array.from(new Set(arr)).join(',');
+}
+function collectOwnerPhones(meta?: MetaBlock) {
+  const base = splitCsv(meta?.drugshopContactPhones);
+  const normalized = base.map(normalizeUgPhone).filter(Boolean);
+  return uniqueCsv(normalized);
+}
+async function sendSms(toPhonesCsv: string, message: string) {
+  const r = await fetch('/api/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: toPhonesCsv, message }),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`SMS failed (${r.status}): ${text || 'Unknown error'}`);
+  }
+  return r.json().catch(() => ({}));
+}
+function buildReminder100Message(it: Inspection, days: number) {
+  const m = it.meta || {};
+  const shop = m.facilityName || m.drugshopName || 'Facility';
+  const ref = m.serialNumber || it.id || '';
+  const impDate = it.impoundment?.impoundmentDate || (m.date as string) || '';
+  const when = fmtDate(impDate);
+  const boxes = it.impoundment?.totalBoxes || m['boxesImpounded' as keyof MetaBlock] || '0';
+  return (
+    `Dear ${shop}, your impounded drugs (${boxes} box(es)) have been in store for ${days} days (since ${when}). ` +
+    `Please arrange to claim them. Ref: ${ref}.`
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Page                                                               */
 /* ------------------------------------------------------------------ */
@@ -151,6 +226,7 @@ export default function InspectionsPage() {
 
   const [qText, setQText] = useState('');
   const [typeFilter, setTypeFilter] = useState<FacilityType | 'All'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | BoxStatus>('All'); // NEW
   const [district, setDistrict] = useState('');
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
@@ -158,6 +234,9 @@ export default function InspectionsPage() {
 
   const lastSeenOrderVal = useRef<string | number | null>(null);
   const reachedEnd = useRef(false);
+
+  // prevent duplicate SMS sends within current session
+  const remindedIds = useRef<Set<string>>(new Set());
 
   const baseRef = ref(db, 'ndachecklists/submissions');
 
@@ -284,9 +363,49 @@ export default function InspectionsPage() {
       const distMatch = !distKey || dist.includes(distKey);
       const dateMatch = (!df || created >= df) && (!dt || created <= dt);
 
-      return textMatch && typeMatch && distMatch && dateMatch;
+      const statusOk =
+        statusFilter === 'All' ||
+        (it.impoundment?.boxStatus || 'Not yet in store') === statusFilter;
+
+      return textMatch && typeMatch && distMatch && dateMatch && statusOk;
     });
-  }, [items, qText, typeFilter, district, dateFrom, dateTo]);
+  }, [items, qText, typeFilter, district, dateFrom, dateTo, statusFilter]);
+
+  /* ---------------- Auto-remind when >100 days in store ---------------- */
+  useEffect(() => {
+    // iterate full dataset (not just visible) to ensure reminders still trigger
+    (async () => {
+      const list = items;
+      for (const it of list) {
+        const imp = it.impoundment;
+        if (!imp) continue;
+        if (imp.boxStatus !== 'In Store') continue; // only while in store
+        if (imp.reminder100SentAt) continue;        // already reminded
+        if (remindedIds.current.has(it.id)) continue; // session guard
+
+        // Determine days in store: from impoundmentDate (or meta.date fallback) to now
+        const start = imp.impoundmentDate || (it.meta?.date as string) || null;
+        const d = daysBetween(start, nowIso());
+        if (d == null) continue;
+        if (d <= 100) continue;
+
+        const toCsv = collectOwnerPhones(it.meta);
+        if (!toCsv) continue;
+
+        try {
+          const msg = buildReminder100Message(it, d);
+          await sendSms(toCsv, msg);
+          await update(ref(db, `ndachecklists/submissions/${it.id}/impoundment`), {
+            reminder100SentAt: nowIso(),
+          });
+          remindedIds.current.add(it.id);
+          // optional visual toast could be added here
+        } catch (e: any) {
+          console.warn('Auto-reminder SMS failed for', it.id, e?.message || e);
+        }
+      }
+    })();
+  }, [items, db]);
 
   return (
     <main className="mx-auto w-full max-w-7xl px-3 sm:px-4 lg:px-6 py-6 sm:py-8">
@@ -348,7 +467,7 @@ export default function InspectionsPage() {
         </div>
 
         {showFilters && (
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-5 gap-3">
             <div>
               <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">Facility Type</label>
               <select
@@ -361,6 +480,20 @@ export default function InspectionsPage() {
                 <option>Veterinary</option>
                 <option>Public</option>
                 <option>Private</option>
+              </select>
+            </div>
+
+            {/* NEW: Status filter */}
+            <div>
+              <label className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1 block">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as 'All' | BoxStatus)}
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+              >
+                {BOX_STATUS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
               </select>
             </div>
 
@@ -474,8 +607,19 @@ function InspectionCard({ item }: { item: Inspection }) {
   const serial = m.serialNumber || '';
   const boxes = toInt(imp?.totalBoxes);
   const reason = imp?.reason || '';
-  const createdBy = m.createdBy || '';
-  const source = m.source || '';
+  const status = imp?.boxStatus || 'Not yet in store';
+
+  // (Optional) small status chip
+  const statusChip =
+    status ? (
+      <span
+        className="inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[11px] font-semibold border"
+        title="Box status"
+      >
+        <ShieldAlert className="h-3.5 w-3.5" />
+        {status}
+      </span>
+    ) : null;
 
   return (
     <article className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4">
@@ -511,6 +655,8 @@ function InspectionCard({ item }: { item: Inspection }) {
             >
               {m.type || '—'}
             </span>
+
+            {statusChip}
 
             {boxes > 0 ? (
               <span
@@ -560,17 +706,17 @@ function InspectionCard({ item }: { item: Inspection }) {
           <span>{dateLabel}</span>
         </div>
 
-        {(createdBy || source) && (
+        {(m.createdBy || m.source) && (
           <>
             <div className="flex items-center gap-1.5 min-w-0">
               <Info className="h-3.5 w-3.5 text-slate-400" />
-              <span className="truncate" title={createdBy || ''}>
-                {createdBy || '—'}
+              <span className="truncate" title={m.createdBy || ''}>
+                {m.createdBy || '—'}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
               <Locate className="h-3.5 w-3.5 text-slate-400" />
-              <span title="Source">{source || '—'}</span>
+              <span title="Source">{m.source || '—'}</span>
             </div>
           </>
         )}

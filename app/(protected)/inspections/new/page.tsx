@@ -114,7 +114,40 @@ function validatePhones(raw: string) {
   return null;
 }
 
-/** Exact same contract as the working detail page helper */
+/** Build the impound message (now includes reasons when available) */
+function buildImpoundMessage(payload: {
+  serialNumber: string;
+  drugshopName: string;
+  boxesImpounded: string;
+  dateIso: string;
+  impoundedBy: string;
+  reasons?: ImpoundReason[];
+}) {
+  const dt = new Date(payload.dateIso);
+  const when = Number.isNaN(dt.getTime())
+    ? payload.dateIso
+    : dt.toLocaleString('en-UG', {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+  const reasonsText =
+    payload.reasons && payload.reasons.length
+      ? ` Reasons: ${payload.reasons.join('; ')}.`
+      : '';
+
+  return (
+    `Dear ${payload.drugshopName || 'Facility'}, ` +
+    `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
+    `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.` +
+    reasonsText
+  );
+}
+
+/** Same contract as detail page helper (POST /api/sms) */
 async function sendSms(toPhonesCsv: string, message: string) {
   const normalized = splitCsv(toPhonesCsv).map(normalizeUgPhone);
   const recipients = uniqueCsv(normalized);
@@ -128,32 +161,6 @@ async function sendSms(toPhonesCsv: string, message: string) {
     throw new Error(`SMS failed (${r.status}): ${text || 'Unknown error'}`);
   }
   return r.json().catch(() => ({}));
-}
-
-/** Build the impound message (same tone as detail page) */
-function buildImpoundMessage(payload: {
-  serialNumber: string;
-  drugshopName: string;
-  boxesImpounded: string;
-  dateIso: string;
-  impoundedBy: string;
-}) {
-  const dt = new Date(payload.dateIso);
-  const when = Number.isNaN(dt.getTime())
-    ? payload.dateIso
-    : dt.toLocaleString('en-UG', {
-        year: 'numeric',
-        month: 'short',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-
-  return (
-    `Dear ${payload.drugshopName || 'Facility'}, ` +
-    `${payload.boxesImpounded || '0'} box(es) were impounded on ${when}. ` +
-    `Serial: ${payload.serialNumber}. Officer: ${payload.impoundedBy}.`
-  );
 }
 
 /* -------- Theme -------- */
@@ -254,7 +261,7 @@ const Accordion = React.memo(function Accordion({
     <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm">
       <button
         type="button"
-        className="w-full flex items-center justify-between px-4 py-3"
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
         onClick={() => toggleOpen(id)}
         aria-expanded={open}
       >
@@ -353,6 +360,7 @@ const YesNoToggle = React.memo(function YesNoToggle({
         className={`px-3 py-1.5 text-sm ${
           value === 'yes' ? 'bg-emerald-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
         }`}
+        aria-pressed={value === 'yes'}
       >
         Yes
       </button>
@@ -362,6 +370,7 @@ const YesNoToggle = React.memo(function YesNoToggle({
         className={`px-3 py-1.5 text-sm border-l border-slate-300 dark:border-slate-700 ${
           value === 'no' ? 'bg-rose-600 text-white' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
         }`}
+        aria-pressed={value === 'no'}
       >
         No
       </button>
@@ -424,10 +433,7 @@ export default function InspectionFormPage() {
   const [inChargeContact, setInChargeContact] = useState('');
   const [districtRepPresent, setDistrictRepPresent] = useState(false);
 
-  // Multiple reasons
   const [impoundReasons, setImpoundReasons] = useState<ImpoundReason[]>([]);
-
-  // Compliance answers
   const [outletAnswers, setOutletAnswers] = useState<Record<string, YesNo>>({});
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -663,7 +669,7 @@ export default function InspectionFormPage() {
       const submissionsRef = ref(db, 'ndachecklists/submissions');
       await pushWithGuard(submissionsRef, payload);
 
-      // -------- SMS Notification (best-effort; matches detail page) --------
+      // -------- SMS Notification (includes reasons) --------
       if (formData.sendSms && boxesNum > 0 && formData.drugshopContactPhones.trim()) {
         try {
           const msg = buildImpoundMessage({
@@ -672,6 +678,7 @@ export default function InspectionFormPage() {
             boxesImpounded: meta.boxesImpounded,
             dateIso: meta.date,
             impoundedBy: meta.impoundedBy,
+            reasons: impoundReasons, // <-- include reasons
           });
           const smsRes = await sendSms(formData.drugshopContactPhones.trim(), msg);
           setLastSmsResult(smsRes);
@@ -833,6 +840,7 @@ export default function InspectionFormPage() {
                     onClick={captureLocation}
                     disabled={isLocating}
                     className="inline-flex items-center gap-2 rounded-xl bg-blue-800 text-white px-3 py-2 text-sm disabled:opacity-60"
+                    aria-busy={isLocating}
                   >
                     {isLocating ? (
                       <>
@@ -940,6 +948,8 @@ export default function InspectionFormPage() {
                             ? 'border-blue-600 bg-blue-50 dark:bg-blue-900/20'
                             : 'border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
                         }`}
+                        aria-pressed={active}
+                        aria-label={`Reason: ${r}`}
                       >
                         <span>{r}</span>
                         {active ? <span className="text-blue-700 dark:text-blue-300">Selected</span> : null}
@@ -1117,6 +1127,7 @@ export default function InspectionFormPage() {
               type="submit"
               disabled={isSubmitting}
               className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-800 text-white px-5 py-2.5 disabled:opacity-70"
+              aria-busy={isSubmitting}
             >
               {isSubmitting ? (
                 <>
